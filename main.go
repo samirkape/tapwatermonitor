@@ -2,17 +2,21 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"github.com/aws/aws-lambda-go/events"
 	"github.com/aws/aws-lambda-go/lambda"
+	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go/aws/session"
+	"github.com/aws/aws-sdk-go/service/sns"
 	ginadapter "github.com/awslabs/aws-lambda-go-api-proxy/gin"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
-	"github.com/joho/godotenv"
 	"github.com/supabase-community/supabase-go"
 	"log"
 	"net/http"
 	"os"
 	"strings"
+	"time"
 )
 
 type tapWaterStartTime struct {
@@ -34,20 +38,18 @@ func Handler(ctx context.Context, req events.APIGatewayProxyRequest) (events.API
 	return ginLambda.ProxyWithContext(ctx, req)
 }
 
-func init() {
-	err := godotenv.Load()
-	if err != nil {
-		log.Fatal("Error loading .env file")
-	}
-}
+//func init() {
+//	err := godotenv.Load()
+//	if err != nil {
+//		log.Fatal("Error loading .env file")
+//	}
+//}
 
 func main() {
-
 	r := gin.Default()
 	r.POST("/default/tapwater", TapWaterHandler)
 	r.POST("/default/tapwater/start", TapWaterStartHandler)
 	r.GET("/default/tapwater/start", TapWaterStartGetHandler)
-	//
 	//if err := r.Run("localhost:8080"); err != nil {
 	//	panic("Failed to start server")
 	//}
@@ -74,6 +76,11 @@ func TapWaterHandler(ctx *gin.Context) {
 	if err != nil {
 		log.Fatal("cannot connect to Supabase")
 	}
+
+	// form message to send SMS
+	duration := fmt.Sprint(record.Duration)
+	message := "Date: " + record.Date + "\nStart Time: " + record.StartTime + "\nEnd Time: " + record.EndTime + "\nDuration: " + duration + " minutes"
+	_ = sendSMS(message)
 
 	// upsert record to the database
 	_, _, err = supabaseClient.From(tableName).Upsert(record, "", "", "").Execute()
@@ -135,6 +142,14 @@ func TapWaterStartHandler(ctx *gin.Context) {
 		log.Fatal("cannot connect to Supabase")
 	}
 
+	// form message to send SMS
+	// get time in IST timezone like hh:mm:ss
+	location, _ := time.LoadLocation("Asia/Kolkata")
+	timeInIST := time.Now().In(location)
+
+	message := "Water has arrived on " + timeInIST.Format("03:04:05 PM")
+	_ = sendSMS(message)
+
 	_, _, err = supabaseClient.From(tableName).Insert(record, false, "", "", "").Execute()
 	if err != nil {
 		ctx.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -143,4 +158,32 @@ func TapWaterStartHandler(ctx *gin.Context) {
 
 	log.Printf("Record inserted successfully")
 	ctx.JSON(http.StatusOK, gin.H{"message": "record inserted successfully"})
+}
+
+func sendSMS(messageContent string) error {
+	mobileNo1 := os.Getenv("MOBILE_NO1")
+	mobileNo2 := os.Getenv("MOBILE_NO2")
+	mobileNo3 := os.Getenv("MOBILE_NO3")
+	phoneNumbers := []string{mobileNo1, mobileNo2, mobileNo3}
+	sess, err := session.NewSession(
+		&aws.Config{
+			Region: aws.String("ap-south-1"),
+		})
+	if err != nil {
+		return err
+	}
+
+	svc := sns.New(sess)
+
+	for _, number := range phoneNumbers {
+		_, err = svc.Publish(&sns.PublishInput{
+			Message:     aws.String(messageContent),
+			PhoneNumber: aws.String(number),
+		})
+		if err != nil {
+			log.Printf("Error sending SMS to %s: %v", number, err)
+			continue
+		}
+	}
+	return nil
 }
