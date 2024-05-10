@@ -1,6 +1,5 @@
 #define BLYNK_TEMPLATE_ID "TMPL3SLz34feC"
 #define BLYNK_TEMPLATE_NAME "esp32"
-#define BLYNK_AUTH_TOKEN "3lXKsv3mOe-MqJX8ML_3jJNpRsOBpfxl"
 
 #include <WiFi.h>
 #include <HTTPClient.h>
