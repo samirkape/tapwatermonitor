@@ -38,6 +38,9 @@ func Handler(ctx context.Context, req events.APIGatewayProxyRequest) (events.API
 	return ginLambda.ProxyWithContext(ctx, req)
 }
 
+const ACCOUNT_SID_ENV = "TWILIO_ACCOUNT_SID"
+const ACCOUNT_AUTH_TOKEN_ENV = "TWILIO_AUTH_TOKEN"
+
 //func init() {
 //	err := godotenv.Load()
 //	if err != nil {
@@ -174,6 +177,13 @@ func sendSMS(messageContent string) error {
 	}
 
 	svc := sns.New(sess)
+
+	_, err = svc.SetSMSAttributes(&sns.SetSMSAttributesInput{
+		Attributes: map[string]*string{
+			"DefaultSMSType":    aws.String("Transactional"),
+			"MonthlySpendLimit": aws.String("1"),
+		},
+	})
 
 	for _, number := range phoneNumbers {
 		_, err = svc.Publish(&sns.PublishInput{
