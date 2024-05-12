@@ -47,12 +47,12 @@ var debug string
 var enableSMS string
 
 func init() {
-	debug = os.Getenv("DEBUG")
-	enableSMS = os.Getenv("ENABLE_SMS")
 	err := godotenv.Load()
 	if err != nil {
 		log.Printf("Error loading .env file")
 	}
+	debug = os.Getenv("DEBUG")
+	enableSMS = os.Getenv("ENABLE_SMS")
 }
 
 func main() {
@@ -102,12 +102,13 @@ func TapWaterHandler(ctx *gin.Context) {
 		return
 	}
 
-	// trim first 5 characters from the date
-	date := strings.Split(record.Date, " ")[1]
-	_, _, err = supabaseClient.From("start_time").Delete("", "").Eq("date", date).Execute()
-	if err != nil {
-		ctx.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
+	if record.Date == "" {
+		date := strings.Split(record.Date, " ")[1]
+		_, _, err = supabaseClient.From("start_time").Delete("", "").Eq("date", date).Execute()
+		if err != nil {
+			ctx.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
 	}
 
 	log.Printf("Record inserted successfully")
