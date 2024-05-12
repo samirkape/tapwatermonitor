@@ -44,11 +44,11 @@ const ACCOUNT_SID_ENV = "TWILIO_ACCOUNT_SID"
 const ACCOUNT_AUTH_TOKEN_ENV = "TWILIO_AUTH_TOKEN"
 
 var debug string
-var disableSMS string
+var enableSMS string
 
 func init() {
 	debug = os.Getenv("DEBUG")
-	disableSMS = os.Getenv("DISABLE_SMS")
+	enableSMS = os.Getenv("ENABLE_SMS")
 	err := godotenv.Load()
 	if err != nil {
 		log.Printf("Error loading .env file")
@@ -169,13 +169,13 @@ func TapWaterStartHandler(ctx *gin.Context) {
 		return
 	}
 
-	log.Printf("Record inserted successfully")
+	log.Printf("record inserted successfully")
 	ctx.JSON(http.StatusOK, gin.H{"message": "record inserted successfully"})
 }
 
 // send sms using twilio
 func sendSMS(message string) error {
-	if disableSMS != "true" {
+	if enableSMS == "true" {
 		accountSid := os.Getenv(ACCOUNT_SID_ENV)
 		authToken := os.Getenv(ACCOUNT_AUTH_TOKEN_ENV)
 		if accountSid == "" || authToken == "" {
