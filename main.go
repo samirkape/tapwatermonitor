@@ -2,16 +2,18 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"github.com/aws/aws-lambda-go/events"
 	"github.com/aws/aws-lambda-go/lambda"
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/session"
-	"github.com/aws/aws-sdk-go/service/sns"
 	ginadapter "github.com/awslabs/aws-lambda-go-api-proxy/gin"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/joho/godotenv"
 	"github.com/supabase-community/supabase-go"
+	"github.com/twilio/twilio-go"
+	twilioApi "github.com/twilio/twilio-go/rest/api/v2010"
+
 	"log"
 	"net/http"
 	"os"
@@ -41,23 +43,31 @@ func Handler(ctx context.Context, req events.APIGatewayProxyRequest) (events.API
 const ACCOUNT_SID_ENV = "TWILIO_ACCOUNT_SID"
 const ACCOUNT_AUTH_TOKEN_ENV = "TWILIO_AUTH_TOKEN"
 
-//func init() {
-//	err := godotenv.Load()
-//	if err != nil {
-//		log.Fatal("Error loading .env file")
-//	}
-//}
+var debug string
+var disableSMS string
+
+func init() {
+	debug = os.Getenv("DEBUG")
+	disableSMS = os.Getenv("DISABLE_SMS")
+	err := godotenv.Load()
+	if err != nil {
+		log.Printf("Error loading .env file")
+	}
+}
 
 func main() {
 	r := gin.Default()
 	r.POST("/default/tapwater", TapWaterHandler)
 	r.POST("/default/tapwater/start", TapWaterStartHandler)
 	r.GET("/default/tapwater/start", TapWaterStartGetHandler)
-	//if err := r.Run("localhost:8080"); err != nil {
-	//	panic("Failed to start server")
-	//}
-	ginLambda = ginadapter.New(r)
-	lambda.Start(Handler)
+	if debug == "true" {
+		if err := r.Run("localhost:8080"); err != nil {
+			panic("Failed to start server")
+		}
+	} else {
+		ginLambda = ginadapter.New(r)
+		lambda.Start(Handler)
+	}
 }
 
 func TapWaterHandler(ctx *gin.Context) {
@@ -82,11 +92,11 @@ func TapWaterHandler(ctx *gin.Context) {
 
 	// form message to send SMS
 	duration := fmt.Sprint(record.Duration)
-	message := "Date: " + record.Date + "\nStart Time: " + record.StartTime + "\nEnd Time: " + record.EndTime + "\nDuration: " + duration + " minutes"
+	message := "\nDate: " + record.Date + "\nStart Time: " + record.StartTime + "\nEnd Time: " + record.EndTime + "\nDuration: " + duration + " minutes"
 	_ = sendSMS(message)
 
 	// upsert record to the database
-	_, _, err = supabaseClient.From(tableName).Upsert(record, "", "", "").Execute()
+	_, _, err = supabaseClient.From(tableName).Upsert(record, "", "", "").Eq("start_time", record.StartTime).Execute()
 	if err != nil {
 		ctx.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -150,7 +160,7 @@ func TapWaterStartHandler(ctx *gin.Context) {
 	location, _ := time.LoadLocation("Asia/Kolkata")
 	timeInIST := time.Now().In(location)
 
-	message := "Water has arrived on " + timeInIST.Format("03:04:05 PM")
+	message := "\nWater has arrived on " + timeInIST.Format("03:04:05 PM")
 	_ = sendSMS(message)
 
 	_, _, err = supabaseClient.From(tableName).Insert(record, false, "", "", "").Execute()
@@ -163,36 +173,43 @@ func TapWaterStartHandler(ctx *gin.Context) {
 	ctx.JSON(http.StatusOK, gin.H{"message": "record inserted successfully"})
 }
 
-func sendSMS(messageContent string) error {
-	mobileNo1 := os.Getenv("MOBILE_NO1")
-	mobileNo2 := os.Getenv("MOBILE_NO2")
-	mobileNo3 := os.Getenv("MOBILE_NO3")
-	phoneNumbers := []string{mobileNo1, mobileNo2, mobileNo3}
-	sess, err := session.NewSession(
-		&aws.Config{
-			Region: aws.String("ap-south-1"),
+// send sms using twilio
+func sendSMS(message string) error {
+	if disableSMS != "true" {
+		accountSid := os.Getenv(ACCOUNT_SID_ENV)
+		authToken := os.Getenv(ACCOUNT_AUTH_TOKEN_ENV)
+		if accountSid == "" || authToken == "" {
+			log.Fatal("Twilio account SID or auth token not found")
+		}
+
+		client := twilio.NewRestClientWithParams(twilio.ClientParams{
+			Username: accountSid,
+			Password: authToken,
 		})
-	if err != nil {
-		return err
-	}
 
-	svc := sns.New(sess)
+		// Define the from and to numbers
+		fromNumber := "+12512378296" // replace with your Twilio number
+		toNumbers := []string{
+			os.Getenv("MOBILE_NO1"),
+			os.Getenv("MOBILE_NO2"),
+			os.Getenv("MOBILE_NO3"),
+		}
 
-	_, err = svc.SetSMSAttributes(&sns.SetSMSAttributesInput{
-		Attributes: map[string]*string{
-			"DefaultSMSType":    aws.String("Transactional"),
-			"MonthlySpendLimit": aws.String("1"),
-		},
-	})
+		for _, toNumber := range toNumbers {
+			// Create the message
+			params := twilioApi.CreateMessageParams{
+				From: &fromNumber,
+				To:   &toNumber,
+				Body: &message,
+			}
 
-	for _, number := range phoneNumbers {
-		_, err = svc.Publish(&sns.PublishInput{
-			Message:     aws.String(messageContent),
-			PhoneNumber: aws.String(number),
-		})
-		if err != nil {
-			log.Printf("Error sending SMS to %s: %v", number, err)
-			continue
+			resp, err := client.Api.CreateMessage(&params)
+			if err != nil {
+				fmt.Println("Error sending SMS message: " + err.Error())
+			} else {
+				response, _ := json.Marshal(*resp)
+				fmt.Println("Response: " + string(response))
+			}
 		}
 	}
 	return nil
