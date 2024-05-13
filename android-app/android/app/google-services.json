@@ -1,0 +1,54 @@
+{
+  "project_info": {
+    "project_number": "1061699000371",
+    "project_id": "tapwater-1cd03",
+    "storage_bucket": "tapwater-1cd03.appspot.com"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:1061699000371:android:2e825e69920e9b53ee2b46",
+        "android_client_info": {
+          "package_name": "com.mycompany.tapwater"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "1061699000371-6dc1ebqibd820g4j7qf20so9koidejer.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.mycompany.tapwater",
+            "certificate_hash": "9bbb3186b2189ef16d8f272bdab59362c395cbb4"
+          }
+        },
+        {
+          "client_id": "1061699000371-f7ophnp7crav82ev8ndianvtr0q8jkp8.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBR_IsiMwpWf6rpYd3ybqWnslZhA5Ez-ng"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "1061699000371-f7ophnp7crav82ev8ndianvtr0q8jkp8.apps.googleusercontent.com",
+              "client_type": 3
+            },
+            {
+              "client_id": "1061699000371-i66o27niaeegg3po720ljqseuakk6vr8.apps.googleusercontent.com",
+              "client_type": 2,
+              "ios_info": {
+                "bundle_id": "com.mycompany.tapwater"
+              }
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

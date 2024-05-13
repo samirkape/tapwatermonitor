@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CLIENT_ID</key>
+	<string>1061699000371-i66o27niaeegg3po720ljqseuakk6vr8.apps.googleusercontent.com</string>
+	<key>REVERSED_CLIENT_ID</key>
+	<string>com.googleusercontent.apps.1061699000371-i66o27niaeegg3po720ljqseuakk6vr8</string>
+	<key>ANDROID_CLIENT_ID</key>
+	<string>1061699000371-6dc1ebqibd820g4j7qf20so9koidejer.apps.googleusercontent.com</string>
+	<key>API_KEY</key>
+	<string>AIzaSyC7mjjNHiU6_U7DkNyqrhUNsU2ADrnHha8</string>
+	<key>GCM_SENDER_ID</key>
+	<string>1061699000371</string>
+	<key>PLIST_VERSION</key>
+	<string>1</string>
+	<key>BUNDLE_ID</key>
+	<string>com.mycompany.tapwater</string>
+	<key>PROJECT_ID</key>
+	<string>tapwater-1cd03</string>
+	<key>STORAGE_BUCKET</key>
+	<string>tapwater-1cd03.appspot.com</string>
+	<key>IS_ADS_ENABLED</key>
+	<false></false>
+	<key>IS_ANALYTICS_ENABLED</key>
+	<false></false>
+	<key>IS_APPINVITE_ENABLED</key>
+	<true></true>
+	<key>IS_GCM_ENABLED</key>
+	<true></true>
+	<key>IS_SIGNIN_ENABLED</key>
+	<true></true>
+	<key>GOOGLE_APP_ID</key>
+	<string>1:1061699000371:ios:3de3cb75c0d1aa31ee2b46</string>
+</dict>
+</plist>
