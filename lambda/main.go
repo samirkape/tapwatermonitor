@@ -12,12 +12,12 @@ import (
 	"github.com/supabase-community/supabase-go"
 	"github.com/twilio/twilio-go"
 	twilioApi "github.com/twilio/twilio-go/rest/api/v2010"
+	"strings"
 	"time"
 
 	"log"
 	"net/http"
 	"os"
-	"strings"
 )
 
 type tapWaterStartTime struct {
@@ -84,13 +84,13 @@ func TapWaterHandler(ctx *gin.Context) {
 		return
 	}
 
+	log.Printf("request: %+v, request body: %+v", ctx.FullPath(), record)
+
 	supabaseClient, err := createSupabaseClient()
 	if err != nil {
 		ctx.JSON(http.StatusInternalServerError, gin.H{"cannot connect to Supabase": err.Error()})
 		return
 	}
-
-	log.Printf("Record: %+v", record)
 
 	sendDepartureSMS(record)
 
@@ -101,13 +101,15 @@ func TapWaterHandler(ctx *gin.Context) {
 		return
 	}
 
-	if record.Date == "" {
+	if record.Date != "" {
 		date := strings.Split(record.Date, " ")[1]
-		_, _, err = supabaseClient.From("start_time").Delete("", "").Eq("date", date).Execute()
+		log.Printf("deleting start_time record for date: %s", date)
+		response, _, err := supabaseClient.From("start_time").Delete("", "").Eq("date", date).Execute()
 		if err != nil {
 			ctx.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
+		log.Printf("start_time -> date delete response: %+v", response)
 	}
 
 	log.Printf("record inserted successfully")
@@ -145,6 +147,8 @@ func TapWaterStartHandler(ctx *gin.Context) {
 		return
 	}
 
+	log.Printf("request: %+v, request body: %+v", ctx.FullPath(), record)
+
 	sendArrivalSMS()
 
 	supabaseClient, err := createSupabaseClient()
@@ -177,9 +181,11 @@ func sendArrivalSMS() {
 func sendDepartureSMS(record tapWater) {
 	duration := fmt.Sprint(record.Duration)
 	message := "\nDate: " + record.Date + "\nStart Time: " + record.StartTime + "\nEnd Time: " + record.EndTime + "\nDuration: " + duration + " minutes"
-	err := sendSMS(message)
-	if err != nil {
-		log.Printf("error sending departure sms: %v", err)
+	if record.Duration != 0 {
+		err := sendSMS(message)
+		if err != nil {
+			log.Printf("error sending departure sms: %v", err)
+		}
 	}
 }
 

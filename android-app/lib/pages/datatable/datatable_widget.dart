@@ -489,7 +489,7 @@ class _DatatableWidgetState extends State<DatatableWidget> {
                     onPressed: () async {
                       _model.apiResultwh3 = await TurnoffalarmCall.call();
                       _model.instantTimer = InstantTimer.periodic(
-                        duration: Duration(milliseconds: 2000),
+                        duration: Duration(milliseconds: 8000),
                         callback: (timer) async {
                           unawaited(
                             () async {
