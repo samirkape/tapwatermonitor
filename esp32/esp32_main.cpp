@@ -10,6 +10,7 @@
 #include <utility>
 #include "esp_err.h"
 
+
 volatile int trigger = 0;
 const int LED_PIN = 14;
 const int RELAY_PIN = 25;
@@ -21,7 +22,7 @@ WiFiClientSecure espClient;
 PubSubClient client(espClient);
 Timezone India;
 
-bool enableDebug = false;
+bool enableDebug = true; // TODO
 
 QueueHandle_t queue;
 
@@ -78,7 +79,7 @@ void printAndPublish(bool isConnected = true, const char* format = "", ...) {
 
 void notifyWaterGone()
 {
-    printAndPublish("water has gone at: ", getDateTimeForFormat("g:i A").c_str());
+    printAndPublish(true,"water has gone at: %s", getDateTimeForFormat("g:i A").c_str());
     digitalWrite(RELAY_PIN, HIGH);
     vTaskDelay(5000 / portTICK_PERIOD_MS);
     digitalWrite(RELAY_PIN, LOW);
@@ -141,9 +142,10 @@ String createJsonDataForTapwater(const String &startTime, const String &endTime,
     serializeJson(jsonDoc, jsonData);
 
     if (jsonData.length() > 0) {
-        printAndPublish("JsonDataForTapwater: %s", jsonData.c_str());
+        printAndPublish(true,"JsonDataForTapwater: %s", jsonData.c_str());
     } else {
-        printAndPublish("Failed to serialize JSON for tap water data");
+        printAndPublish(true,"Failed to serialize JSON for tap water data");
+        return "";
     }
 
     return jsonData;
@@ -157,7 +159,7 @@ String createJsonDataForStartTime(const String& startTime, const String &date)
 
     String jsonString;
     serializeJson(jsonDoc, jsonString);
-    printAndPublish("JsonDataForStartTime: %s",jsonString.c_str());
+    printAndPublish(true, "JsonDataForStartTime: %s",jsonString.c_str());
     return jsonString;
 }
 
@@ -168,46 +170,51 @@ String parseResponse(String response)
 
     if (error)
     {
-        printAndPublish("deserializeJson() failed: %s", error.c_str());
+        printAndPublish(true,"deserializeJson() failed: %s", error.c_str());
         return "";
     }
 
-    printAndPublish("Parsed start time respose: %s", response.c_str());
+    printAndPublish(true,"Parsed start time respose: %s", response.c_str());
 
     String startTime = doc["start_time"];
+    printAndPublish(true, "decoded start_time: %s", startTime.c_str());
+
     if (startTime != "")
     {
-        printAndPublish("Start Time: %s", startTime.c_str());
+        printAndPublish(true, "Start Time: %s", startTime.c_str());
     }
     else
     {
-        printAndPublish("Start time not found in response");
+        printAndPublish(true,"Start time not found in response");
         return "";
     }
 
-    return startTime;
+    return startTime.c_str();
 }
 
-String getTapWaterStartTime(const String& date, String startTimeAPI)
+String getTapWaterStartTime(const String& date)
 {
     HTTPClient client;
     String response;
 
-    String url = String(std::move(startTimeAPI)) + "?date=" + date;
+    String url = String(startTimeAPI) + "?date=" + date;
+    printAndPublish(true,"getTapWaterStartTime: %s", url.c_str());
+
     client.begin(url);
 
     client.addHeader("Content-Type", "application/json");
 
     int httpResponseCode = client.GET();
 
-    if (httpResponseCode > 0)
+    if (httpResponseCode == 200)
     {
         response = client.getString();
-        printAndPublish("Response: %s", response.c_str());
+        printAndPublish(true,"Response: %s", response.c_str());
     }
     else
     {
-        printAndPublish("Error request failed, code: %s", String(httpResponseCode).c_str());
+        printAndPublish(true,"Error request failed, code: %s", String(httpResponseCode).c_str());
+        return "";
     }
 
     client.end();
@@ -219,46 +226,45 @@ String makePOSTRequest(String jsonData, String apiUrl)
     HTTPClient http;
     String payload;
 
-    printAndPublish("Connecting to API endpoint...");
+    printAndPublish(true,"Connecting to API endpoint...");
     http.begin(std::move(apiUrl));
 
     http.addHeader("Content-Type", "application/json");
-    printAndPublish("Sending HTTP POST request...");
+    printAndPublish(true,"Sending HTTP POST request...");
     int httpResponseCode = http.POST(std::move(jsonData));
 
     if (httpResponseCode > 0)
     {
-        printAndPublish("HTTP Response code: %s", String(httpResponseCode).c_str());
+        printAndPublish(true,"HTTP Response code: %s", String(httpResponseCode).c_str());
         payload = http.getString();
-        printAndPublish(payload.c_str());
+        printAndPublish(true,"makePOSTRequest payload: %s", payload.c_str());
     }
     else
     {
-        printAndPublish("Error code: %s", String(httpResponseCode).c_str());
+        printAndPublish(true,"Error code: %s", String(httpResponseCode).c_str());
     }
 
     http.end();
     return payload;
 }
 
-String createTapwaterRecord(String jsonData, String tapWaterAPI)
+String createTapwaterRecord(String jsonData)
 {
-    printAndPublish("Sending API request...");
-    String id = makePOSTRequest(std::move(jsonData), std::move(tapWaterAPI));
+    printAndPublish(true,"Sending API request...");
+    String id = makePOSTRequest(std::move(jsonData), tapWaterAPI);
     return id;
 }
 
 void startWireless()
 {
-    delay(5000);
-    Serial.println("Connecting to WiFi After Waking up...");
+    printAndPublish(false, "Connecting to WiFi After Waking up...");
     Blynk.begin(auth, ssid, password);
     waitForSync();
     India.setLocation(F("Asia/Kolkata"));
     espClient.setCACert(root_ca);
     client.setServer(mqtt_server, mqtt_port);
     xTaskCreate(customLoop, "customLoop", 30000, NULL, 1, NULL);
-    printAndPublish("Connected to WiFi");
+    printAndPublish(true, "Connected to WiFi");
 }
 
 void triggerSound(void *parameter)
@@ -305,7 +311,7 @@ void waitForSensorState(int state, unsigned long duration, const char* message, 
             }
             delay(2000);
             int remainingTime = (duration / 1000) - ((millis() - startTime) / 1000); // Calculate the remaining time
-            printAndPublish(isConnected,"sensor is %s, waiting for %d seconds\n", state == HIGH ? "HIGH" : "LOW", remainingTime);
+            printAndPublish(isConnected,"sensor is %s, waiting for %d seconds", state == HIGH ? "HIGH" : "LOW", remainingTime);
         } else {
             startTime = 0; // Reset the timer when GPIO_NUM_33 changes state
         }
@@ -316,7 +322,7 @@ void handleHighState() {
     if (trigger == 0)
     {
         shouldBlink = true;
-        Serial.println("starting wake up sequence");
+        printAndPublish(false, "starting wake up sequence");
 
         // trigger sound and start blink led
         xTaskCreate(triggerSound, "triggerSound", 1000, NULL, 1, NULL);
@@ -326,25 +332,45 @@ void handleHighState() {
         startWireless();
 
         // check if the start time is already present in the database
+        printAndPublish(true,"handleHighState: Checking for start time in database");
         String date = getDateTimeForFormat("d-M-Y"); // Get the current date
-        String startTime = getTapWaterStartTime(date, startTimeAPI);
+        printAndPublish(true,"Current date: %s", date.c_str());
+        String startTime = getTapWaterStartTime(date);
+        printAndPublish(true,"Start time from database: %s", startTime.c_str());
+        printAndPublish(true,"startTime: %d", startTime.isEmpty());
 
         if (startTime == "")
         {
+            printAndPublish(true,"handleHighState: Start time not found, creating new records");
             // If the start time is not present in the database, create a new tapwater record
-            String timeNow = getDateTimeForFormat("g:i A"); // Get the current time
+            String timeNow = getDateTimeForFormat("g:i A"); // Get the current time in 12-hour format
+            printAndPublish(true,"Current time: %s", timeNow.c_str());
             String jsonData = createJsonDataForTapwater(timeNow, "", 0, getDateTimeForFormat("D, d-M-Y"));
-            createTapwaterRecord(jsonData, tapWaterAPI);
+            printAndPublish(true,"Json data for createJsonDataForTapwater: %s", jsonData.c_str());
+            createTapwaterRecord(jsonData);
 
             // Also, create a new start time record
             String startTime24hr = getDateTimeForFormat("H:i"); // 24-hour format
+            printAndPublish(true,"startTime24hr: %s", startTime24hr.c_str());
             String startTimeDBJson = createJsonDataForStartTime(startTime24hr, date);
+            printAndPublish(true,"Json data for createJsonDataForStartTime: %s", startTimeDBJson.c_str());
             makePOSTRequest(startTimeDBJson, startTimeAPI);
         }
     }
     trigger = 1;
-    printAndPublish("sensor is HIGH");
-    delay(2000);
+    printAndPublish(true,"sensor is HIGH");
+    delay(5000);
+}
+
+// convert string formatted 24 hour time to 12 hour time format
+String convert24To12(String time)
+{
+    int hour, minute;
+    sscanf(time.c_str(), "%d:%d", &hour, &minute);
+    String suffix = hour >= 12 ? "PM" : "AM";
+    hour = hour % 12;
+    hour = hour ? hour : 12;
+    return String(hour) + ":" + String(minute) + " " + suffix;
 }
 
 void handleLowState() {
@@ -357,12 +383,13 @@ void handleLowState() {
         String date = getDateTimeForFormat("d-M-Y");
 
         String endTime24hr = getDateTimeForFormat("H:i");
-        String startTime24hr = getTapWaterStartTime(date, startTimeAPI);
+        String startTime24hr = getTapWaterStartTime(date);
 
         int elapsedTime = calculateDurationInMinutes(startTime24hr.c_str(), endTime24hr.c_str());
         printAndPublish(true, "elapsedTime: %d", elapsedTime);
-        String jsonData = createJsonDataForTapwater("", endTime, elapsedTime, getDateTimeForFormat("D, d-M-Y"));
-        createTapwaterRecord(jsonData, tapWaterAPI);
+        String jsonData = createJsonDataForTapwater(convert24To12(startTime24hr), endTime, elapsedTime, getDateTimeForFormat("D, d-M-Y"));
+        printAndPublish(true, "handleLowState: ending wake up sequence: createJsonDataForTapwater: %s", jsonData.c_str());
+        createTapwaterRecord(jsonData);
 
         trigger = 0;
     }
@@ -380,12 +407,12 @@ void processTrigger() {
     }
 
     // confirm that the sensor is low
-    waitForSensorState(LOW, 50000, "sensor was LOW for last 50 seconds, ending wake up sequence", true);
+    waitForSensorState(LOW, 35000, "sensor was LOW for last 35 seconds, ending wake up sequence", true);
 
     handleLowState();
 
     xQueueReceive(queue, &value, 0);
-    printAndPublish(true, "releasing queue value: %d\n", value);
+    printAndPublish(true, "releasing queue value: %d", value);
     shouldBlink = false;
 }
 
@@ -409,7 +436,7 @@ void sensor_woke_up()
         } else {
             printAndPublish(false,"waiting for sensor to be HIGH");
             xQueueReceive(queue, &value, 0);
-            printAndPublish(false,"releasing queue value: %d\n", value);
+            printAndPublish(false,"releasing queue value: %d", value);
         }
     } else {
         printAndPublish(false,"waiting for queue to be empty");

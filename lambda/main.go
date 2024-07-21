@@ -22,7 +22,7 @@ import (
 
 type tapWaterStartTime struct {
 	Date      string `json:"date,omitempty"`
-	StartTime int64  `json:"start_time,omitempty"`
+	StartTime string `json:"start_time,omitempty"`
 }
 
 type tapWater struct {
@@ -48,7 +48,7 @@ func Handler(ctx context.Context, req events.APIGatewayProxyRequest) (events.API
 func init() {
 	err := godotenv.Load()
 	if err != nil {
-		log.Printf("Error loading .env file")
+		log.Printf("error loading .env file")
 	}
 	debug = os.Getenv("DEBUG")
 	enableSMS = os.Getenv("ENABLE_SMS")
@@ -94,8 +94,13 @@ func TapWaterHandler(ctx *gin.Context) {
 
 	sendDepartureSMS(record)
 
+	filter := map[string]string{
+		"date":       record.Date,
+		"start_time": record.StartTime,
+	}
+
 	// upsert record to the database
-	_, _, err = supabaseClient.From(tableName).Upsert(record, "", "", "").Eq("start_time", record.StartTime).Execute()
+	_, _, err = supabaseClient.From(tableName).Upsert(record, "", "", "").Match(filter).Execute()
 	if err != nil {
 		ctx.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -128,13 +133,12 @@ func TapWaterStartGetHandler(ctx *gin.Context) {
 		return
 	}
 
-	res, err := supabaseClient.From(tableName).Select("*", "", false).Eq("date", date).Single().ExecuteTo(&record)
+	_, err = supabaseClient.From(tableName).Select("*", "", false).Eq("date", date).Single().ExecuteTo(&record)
 	if err != nil {
 		ctx.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 
-	log.Printf("Count: %+v", res)
 	ctx.JSON(http.StatusOK, record)
 }
 
