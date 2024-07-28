@@ -9,6 +9,7 @@
 
 #include <utility>
 #include "esp_err.h"
+#include <Preferences.h>
 
 
 volatile int trigger = 0;
@@ -17,6 +18,8 @@ const int RELAY_PIN = 25;
 const int RELAY_TURN_OFF_BUTTON = 26;
 volatile bool shouldBlink = false;
 const int mqtt_port = 8883;
+Preferences preferences;
+
 
 WiFiClientSecure espClient;
 PubSubClient client(espClient);
@@ -233,7 +236,7 @@ String makePOSTRequest(String jsonData, String apiUrl)
     printAndPublish(true,"Sending HTTP POST request...");
     int httpResponseCode = http.POST(std::move(jsonData));
 
-    if (httpResponseCode > 0)
+    if (httpResponseCode == 201)
     {
         printAndPublish(true,"HTTP Response code: %s", String(httpResponseCode).c_str());
         payload = http.getString();
@@ -258,13 +261,14 @@ String createTapwaterRecord(String jsonData)
 void startWireless()
 {
     printAndPublish(false, "Connecting to WiFi After Waking up...");
+    delay(4000);
     Blynk.begin(auth, ssid, password);
     waitForSync();
     India.setLocation(F("Asia/Kolkata"));
     espClient.setCACert(root_ca);
     client.setServer(mqtt_server, mqtt_port);
     xTaskCreate(customLoop, "customLoop", 30000, NULL, 1, NULL);
-    printAndPublish(true, "Connected to WiFi");
+    printAndPublish(true, "Connected to WiFi, Blynk, NATS, and MQTT Broker");
 }
 
 void triggerSound(void *parameter)
@@ -318,6 +322,7 @@ void waitForSensorState(int state, unsigned long duration, const char* message, 
     }
 }
 
+
 void handleHighState() {
     if (trigger == 0)
     {
@@ -325,8 +330,11 @@ void handleHighState() {
         printAndPublish(false, "starting wake up sequence");
 
         // trigger sound and start blink led
-        xTaskCreate(triggerSound, "triggerSound", 1000, NULL, 1, NULL);
-        xTaskCreate(blinkLed, "blinkLed", 1000, NULL, 1, NULL);
+        bool flag = preferences.getBool("tw", false);
+        if (!flag){
+            xTaskCreate(triggerSound, "triggerSound", 1000, nullptr, 1, nullptr);
+        }
+        xTaskCreate(blinkLed, "blinkLed", 1000, nullptr, 1, nullptr);
 
         // start wireless connection
         startWireless();
@@ -347,8 +355,8 @@ void handleHighState() {
             printAndPublish(true,"Current time: %s", timeNow.c_str());
             String jsonData = createJsonDataForTapwater(timeNow, "", 0, getDateTimeForFormat("D, d-M-Y"));
             printAndPublish(true,"Json data for createJsonDataForTapwater: %s", jsonData.c_str());
-            createTapwaterRecord(jsonData);
-
+            String response = createTapwaterRecord(jsonData);
+            preferences.putBool("tw", true);
             // Also, create a new start time record
             String startTime24hr = getDateTimeForFormat("H:i"); // 24-hour format
             printAndPublish(true,"startTime24hr: %s", startTime24hr.c_str());
@@ -362,7 +370,7 @@ void handleHighState() {
     delay(5000);
 }
 
-// convert string formatted 24 hour time to 12 hour time format
+// convert string formatted 24 hour time to 12-hour time format
 String convert24To12(String time)
 {
     int hour, minute;
@@ -389,8 +397,8 @@ void handleLowState() {
         printAndPublish(true, "elapsedTime: %d", elapsedTime);
         String jsonData = createJsonDataForTapwater(convert24To12(startTime24hr), endTime, elapsedTime, getDateTimeForFormat("D, d-M-Y"));
         printAndPublish(true, "handleLowState: ending wake up sequence: createJsonDataForTapwater: %s", jsonData.c_str());
-        createTapwaterRecord(jsonData);
-
+        String response = createTapwaterRecord(jsonData);
+        preferences.putBool("tw", false);
         trigger = 0;
     }
 }
@@ -446,6 +454,7 @@ void sensor_woke_up()
 void setup()
 {
     Serial.begin(115200);
+    preferences.begin("tw", false);
 
     pinMode(LED_PIN, OUTPUT); // pin 14 led
     digitalWrite(LED_PIN, LOW);
