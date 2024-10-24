@@ -12,24 +12,29 @@ import (
 	"github.com/supabase-community/supabase-go"
 	"github.com/twilio/twilio-go"
 	twilioApi "github.com/twilio/twilio-go/rest/api/v2010"
-	"strings"
-	"time"
-
 	"log"
 	"net/http"
 	"os"
+	"time"
 )
 
-type tapWaterStartTime struct {
-	Date      string `json:"date,omitempty"`
-	StartTime string `json:"start_time,omitempty"`
+// New status-based request structure
+type waterStatus struct {
+	Status string `json:"status"`
+	Date   string `json:"date"`
 }
 
+// Existing structures for database
 type tapWater struct {
 	Date      string `json:"date,omitempty"`
 	StartTime string `json:"start_time,omitempty"`
 	EndTime   string `json:"end_time,omitempty"`
 	Duration  int    `json:"duration,omitempty"`
+}
+
+type tapWaterStartTime struct {
+	Date      string `json:"date,omitempty"`
+	StartTime string `json:"start_time,omitempty"`
 }
 
 var ginLambda *ginadapter.GinLambda
@@ -56,9 +61,9 @@ func init() {
 
 func main() {
 	r := gin.Default()
-	r.POST("/default/tapwater", TapWaterHandler)
-	r.POST("/default/tapwater/start", TapWaterStartHandler)
+	r.POST("/default/tapwater", TapWaterStatusHandler) // Modified to handle status updates
 	r.GET("/default/tapwater/start", TapWaterStartGetHandler)
+
 	if debug == "true" {
 		if err := r.Run("localhost:8080"); err != nil {
 			panic("Failed to start server")
@@ -75,16 +80,17 @@ func createSupabaseClient() (*supabase.Client, error) {
 	return supabase.NewClient(supabaseUrl, supabaseKey, nil)
 }
 
-func TapWaterHandler(ctx *gin.Context) {
+// New function to handle status updates
+func TapWaterStatusHandler(ctx *gin.Context) {
 	const tableName = "tapwaterdb"
-	var record tapWater
+	var statusUpdate waterStatus
 
-	if err := ctx.BindJSON(&record); err != nil {
+	if err := ctx.BindJSON(&statusUpdate); err != nil {
 		ctx.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
-	log.Printf("request: %+v, request body: %+v", ctx.FullPath(), record)
+	log.Printf("request: %+v, request body: %+v", ctx.FullPath(), statusUpdate)
 
 	supabaseClient, err := createSupabaseClient()
 	if err != nil {
@@ -92,33 +98,89 @@ func TapWaterHandler(ctx *gin.Context) {
 		return
 	}
 
-	sendDepartureSMS(record)
+	location, _ := time.LoadLocation("Asia/Kolkata")
+	currentTime := time.Now().In(location)
 
-	filter := map[string]string{
-		"date":       record.Date,
-		"start_time": record.StartTime,
-	}
+	switch statusUpdate.Status {
+	case "start":
+		startRecord := tapWaterStartTime{
+			Date:      statusUpdate.Date,
+			StartTime: currentTime.Format("15:04"), // 24-hour format
+		}
 
-	// upsert record to the database
-	_, _, err = supabaseClient.From(tableName).Upsert(record, "", "", "").Match(filter).Execute()
-	if err != nil {
-		ctx.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-
-	if record.Date != "" {
-		date := strings.Split(record.Date, " ")[1]
-		log.Printf("deleting start_time record for date: %s", date)
-		response, _, err := supabaseClient.From("start_time").Delete("", "").Eq("date", date).Execute()
+		_, _, err = supabaseClient.From("start_time").Insert(startRecord, false, "", "", "").Execute()
 		if err != nil {
 			ctx.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
-		log.Printf("start_time -> date delete response: %+v", response)
+
+		initialRecord := tapWater{
+			Date:      fmt.Sprintf("%s, %s", currentTime.Format("Mon"), statusUpdate.Date),
+			StartTime: currentTime.Format("3:04 PM"),
+		}
+
+		_, _, err = supabaseClient.From(tableName).Insert(initialRecord, false, "", "", "").Execute()
+		if err != nil {
+			ctx.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+
+		sendArrivalSMS()
+
+	case "end":
+		var startTimeRecord tapWaterStartTime
+		_, err = supabaseClient.From("start_time").
+			Select("*", "", false).
+			Eq("date", statusUpdate.Date).
+			Single().
+			ExecuteTo(&startTimeRecord)
+
+		if err != nil {
+			ctx.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve start time"})
+			return
+		}
+
+		startTimeStr := startTimeRecord.StartTime
+		startTimeParsed, _ := time.Parse("15:04", startTimeStr)
+		duration := int(currentTime.Sub(startTimeParsed).Minutes())
+
+		record := tapWater{
+			Date:      fmt.Sprintf("%s, %s", currentTime.Format("Mon"), statusUpdate.Date),
+			StartTime: startTimeParsed.Format("3:04 PM"),
+			EndTime:   currentTime.Format("3:04 PM"),
+			Duration:  duration,
+		}
+
+		filter := map[string]string{
+			"date":       record.Date,
+			"start_time": record.StartTime,
+		}
+
+		// Update the record
+		_, _, err = supabaseClient.From(tableName).
+			Upsert(record, "", "", "").
+			Match(filter).
+			Execute()
+
+		if err != nil {
+			ctx.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+
+		sendDepartureSMS(record)
+
+		// Clean up start time record
+		_, _, err = supabaseClient.From("start_time").
+			Delete("", "").
+			Eq("date", statusUpdate.Date).
+			Execute()
+
+		if err != nil {
+			log.Printf("Error deleting start time record: %v", err)
+		}
 	}
 
-	log.Printf("record inserted successfully")
-	ctx.JSON(http.StatusCreated, "")
+	ctx.JSON(http.StatusOK, gin.H{"message": "Status processed successfully"})
 }
 
 func TapWaterStartGetHandler(ctx *gin.Context) {
@@ -133,42 +195,18 @@ func TapWaterStartGetHandler(ctx *gin.Context) {
 		return
 	}
 
-	_, err = supabaseClient.From(tableName).Select("*", "", false).Eq("date", date).Single().ExecuteTo(&record)
+	_, err = supabaseClient.From(tableName).
+		Select("*", "", false).
+		Eq("date", date).
+		Single().
+		ExecuteTo(&record)
+
 	if err != nil {
 		ctx.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 
 	ctx.JSON(http.StatusOK, record)
-}
-
-func TapWaterStartHandler(ctx *gin.Context) {
-	const tableName = "start_time"
-
-	var record tapWaterStartTime
-	if err := ctx.BindJSON(&record); err != nil {
-		ctx.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-
-	log.Printf("request: %+v, request body: %+v", ctx.FullPath(), record)
-
-	sendArrivalSMS()
-
-	supabaseClient, err := createSupabaseClient()
-	if err != nil {
-		ctx.JSON(http.StatusInternalServerError, gin.H{"cannot connect to Supabase": err.Error()})
-		return
-	}
-
-	_, _, err = supabaseClient.From(tableName).Insert(record, false, "", "", "").Execute()
-	if err != nil {
-		ctx.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-
-	log.Printf("record inserted successfully")
-	ctx.JSON(http.StatusOK, gin.H{"message": "record inserted successfully"})
 }
 
 func sendArrivalSMS() {
@@ -184,7 +222,11 @@ func sendArrivalSMS() {
 
 func sendDepartureSMS(record tapWater) {
 	duration := fmt.Sprint(record.Duration)
-	message := "\nDate: " + record.Date + "\nStart Time: " + record.StartTime + "\nEnd Time: " + record.EndTime + "\nDuration: " + duration + " minutes"
+	message := "\nDate: " + record.Date +
+		"\nStart Time: " + record.StartTime +
+		"\nEnd Time: " + record.EndTime +
+		"\nDuration: " + duration + " minutes"
+
 	if record.Duration != 0 {
 		err := sendSMS(message)
 		if err != nil {
@@ -193,7 +235,6 @@ func sendDepartureSMS(record tapWater) {
 	}
 }
 
-// send sms using twilio
 func sendSMS(message string) error {
 	if enableSMS == "true" {
 		accountSid := os.Getenv(ACCOUNT_SID_ENV)
@@ -207,8 +248,7 @@ func sendSMS(message string) error {
 			Password: authToken,
 		})
 
-		// Define the from and to numbers
-		fromNumber := "+12512378296" // replace with your Twilio number
+		fromNumber := "+12512378296"
 		toNumbers := []string{
 			os.Getenv("MOBILE_NO1"),
 			os.Getenv("MOBILE_NO2"),
@@ -216,7 +256,6 @@ func sendSMS(message string) error {
 		}
 
 		for _, toNumber := range toNumbers {
-			// Create the message
 			params := twilioApi.CreateMessageParams{
 				From: &fromNumber,
 				To:   &toNumber,
