@@ -6,7 +6,6 @@
 #include "BlynkSimpleEsp32.h"
 #include "PubSubClient.h"
 #include <WiFiClientSecure.h>
-#include <Preferences.h>
 #include "esp_system.h"
 #include "esp_task_wdt.h"
 
@@ -20,51 +19,35 @@ const int RELAY_PIN = 25;
 const int RELAY_TURN_OFF_BUTTON = 26;
 volatile bool shouldBlink = false;
 const int mqtt_port = 8883;
-const int WDT_TIMEOUT = 10;  // Watchdog timeout in seconds
+const int WDT_TIMEOUT = 15; // Watchdog timeout in seconds
 
 // Global objects
 WiFiClientSecure espClient;
 PubSubClient client(espClient);
 Timezone India;
-Preferences preferences;
 bool enableDebug = true;
 QueueHandle_t queue;
 
-// WiFi event handler
-void onWiFiEvent(WiFiEvent_t event) {
-    switch (event) {
-        case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
-            Serial.print("[onWiFiEvent] WiFi begin failed ");
-            WiFi.begin(ssid, password);
-            break;
-        case ARDUINO_EVENT_WIFI_STA_GOT_IP:
-            printAndPublish(true, "[onWiFiEvent] WiFi reconnect succeeded");
-            break;
-        default:
-            break;
-    }
-}
+// Forward declarations of functions used before their definition
+void printAndPublish(bool isConnected = true, const char* format = "", ...);
 
 String getDateTimeForFormat(const String& format) {
     return India.dateTime(format);
 }
 
 void reconnect() {
-    for (int i = 0; i < 2; i++) {
+    while (!client.connected()) {
         Serial.print("Attempting MQTT connection… ");
         String clientId = "ESP32Client";
-        if (!client.connected()) {
-            if (client.connect(clientId.c_str(), mqtt_username, mqtt_password)) {
-                Serial.println("connected!");
-                client.publish(mqtt_topic, "Successfully re-established mqtt connection");
-                client.subscribe(mqtt_topic);
-                break;
-            } else {
-                Serial.print("failed, rc = ");
-                Serial.print(client.state());
-                Serial.println(" try again in 5 seconds");
-                delay(1000);
-            }
+        if (client.connect(clientId.c_str(), mqtt_username, mqtt_password)) {
+            Serial.println("connected!");
+            client.publish(mqtt_topic, "Sent from the other world");
+            client.subscribe(mqtt_topic);
+        } else {
+            Serial.print("failed, rc = ");
+            Serial.print(client.state());
+            Serial.println(" try again in 5 seconds");
+            delay(5000);
         }
     }
 }
@@ -76,7 +59,7 @@ void publishMessage(const char* message) {
     client.publish(mqtt_topic, message);
 }
 
-void printAndPublish(bool isConnected = true, const char* format = "", ...) {
+void printAndPublish(bool isConnected, const char* format, ...) {
     String currentTime = getDateTimeForFormat("g:i:s A");
     char buffer[256];
     va_list args;
@@ -100,27 +83,21 @@ void notifyWaterGone() {
     digitalWrite(RELAY_PIN, LOW);
 }
 
-void triggerSound() {
-    digitalWrite(RELAY_PIN, HIGH);
-    while (true) {
-        if (digitalRead(RELAY_PIN) == LOW) {
-            break;
-        }
-        delay(1000);
-    }
-}
-
 void blinkLed(void *parameter) {
-    esp_task_wdt_add(nullptr);
+    // Configure Watchdog Timer
+    esp_task_wdt_init(WDT_TIMEOUT, true); // Enable panic so ESP32 restarts
+    esp_task_wdt_add(NULL); // Add current thread to WDT watch
+
     pinMode(LED_PIN, OUTPUT);
     while (shouldBlink) {
-        esp_task_wdt_reset();
         digitalWrite(LED_PIN, HIGH);
         vTaskDelay(500 / portTICK_PERIOD_MS);
         digitalWrite(LED_PIN, LOW);
         vTaskDelay(500 / portTICK_PERIOD_MS);
+        esp_task_wdt_reset(); // Reset watchdog timer
     }
     digitalWrite(LED_PIN, LOW);
+    esp_task_wdt_delete(NULL); // Remove thread from WDT watch
     vTaskDelete(nullptr);
 }
 
@@ -130,7 +107,7 @@ void customLoop(void *parameter) {
         client.loop();
         vTaskDelay(20 / portTICK_PERIOD_MS);
     }
-    printAndPublish(true, "Releasing Blynk and HiveMqtt Task");
+    printAndPublish("Releasing Blynk and HiveMqtt Task");
     vTaskDelete(nullptr);
 }
 
@@ -157,7 +134,7 @@ String makePOSTRequest(String jsonData, String apiUrl) {
     printAndPublish(true, "Sending HTTP POST request...");
     int httpResponseCode = http.POST(std::move(jsonData));
 
-    if (httpResponseCode == 201) {
+    if (httpResponseCode > 0) {
         printAndPublish(true, "HTTP Response code: %s", String(httpResponseCode).c_str());
         payload = http.getString();
         printAndPublish(true, "makePOSTRequest payload: %s", payload.c_str());
@@ -183,7 +160,18 @@ void startWireless() {
     espClient.setCACert(root_ca);
     client.setServer(mqtt_server, mqtt_port);
     xTaskCreate(customLoop, "customLoop", 30000, NULL, 1, NULL);
-    printAndPublish(true, "Connected to WiFi, Blynk and Mqtt client");
+    printAndPublish(true, "Connected to WiFi");
+}
+
+void triggerSound(void *parameter) {
+    if (!shouldBlink) {
+        digitalWrite(RELAY_PIN, HIGH);
+        vTaskDelay(3000 / portTICK_PERIOD_MS);
+        digitalWrite(RELAY_PIN, LOW);
+    } else {
+        digitalWrite(RELAY_PIN, HIGH);
+    }
+    vTaskDelete(nullptr);
 }
 
 void IRAM_ATTR triggerSoundOff() {
@@ -212,7 +200,7 @@ void waitForSensorState(int state, unsigned long duration, const char* message, 
             delay(2000);
             int remainingTime = (duration / 1000) - ((millis() - startTime) / 1000);
             printAndPublish(isConnected, "sensor is %s, waiting for %d seconds",
-                          state == HIGH ? "HIGH" : "LOW", remainingTime);
+                            state == HIGH ? "HIGH" : "LOW", remainingTime);
         } else {
             startTime = 0;
         }
@@ -221,17 +209,12 @@ void waitForSensorState(int state, unsigned long duration, const char* message, 
 
 void handleHighState() {
     if (trigger == 0) {
-        esp_task_wdt_add(nullptr);
         shouldBlink = true;
-        bool alreadyAlarmed = preferences.getBool("alreadyAlarmed", false);
-        printAndPublish(false, "alreadyAlarmed: %s", alreadyAlarmed ? "true" : "false");
+        printAndPublish(false, "starting wake up sequence");
 
         // trigger sound and start blink led
+        xTaskCreate(triggerSound, "triggerSound", 1000, NULL, 1, NULL);
         xTaskCreate(blinkLed, "blinkLed", 1000, NULL, 1, NULL);
-        if (!alreadyAlarmed) {
-            triggerSound();
-            preferences.putBool("alreadyAlarmed", true);
-        }
 
         // start wireless connection
         startWireless();
@@ -240,8 +223,7 @@ void handleHighState() {
         sendStatusToAPI("start");
     }
     trigger = 1;
-    esp_task_wdt_reset();
-    printAndPublish(true, "sensor is in HIGH state");
+    printAndPublish(true, "sensor is HIGH");
     delay(5000);
 }
 
@@ -262,7 +244,6 @@ void processTrigger() {
 
     // confirm that the sensor is high
     waitForSensorState(HIGH, 10000, "sensor was HIGH for last 10 seconds, triggering wake up sequence", false);
-    esp_task_wdt_init(WDT_TIMEOUT, true);
 
     while (digitalRead(GPIO_NUM_33) == HIGH) {
         handleHighState();
@@ -270,7 +251,7 @@ void processTrigger() {
 
     // confirm that the sensor is low
     waitForSensorState(LOW, 35000, "sensor was LOW for last 35 seconds, ending wake up sequence", true);
-    preferences.putBool("alreadyAlarmed", false);
+
     handleLowState();
 
     xQueueReceive(queue, &value, 0);
@@ -304,8 +285,6 @@ void sensor_woke_up() {
 
 void setup() {
     Serial.begin(115200);
-    WiFi.onEvent(onWiFiEvent);
-    preferences.begin("tw", false);
 
     // Initialize pins
     pinMode(LED_PIN, OUTPUT);
@@ -327,8 +306,9 @@ void setup() {
     sensor_woke_up();
 
     printAndPublish(false, "going to sleep now");
-    esp_task_wdt_deinit();
     esp_deep_sleep_start();
 }
 
-void loop() {}
+void loop() {
+    // Empty as we're using deep sleep
+}
