@@ -8,6 +8,8 @@
 #include <WiFiClientSecure.h>
 #include "esp_system.h"
 #include "esp_task_wdt.h"
+#include "esp_panic.h"
+#include "Preferences.h"
 
 #include <utility>
 #include "esp_err.h"
@@ -28,11 +30,65 @@ Timezone India;
 bool enableDebug = true;
 QueueHandle_t queue;
 
+Preferences preferences;
+
+const char* PREF_NAMESPACE = "wdt";
+const char* WATCHDOG_RESET_KEY = "reset_count";
+const char* ALARM_TRIGGERED_KEY = "alarm_triggered";
+
 // Forward declarations of functions used before their definition
 void printAndPublish(bool isConnected = true, const char* format = "", ...);
 
 String getDateTimeForFormat(const String& format) {
     return India.dateTime(format);
+}
+
+void shutdown_handler() {
+    esp_reset_reason_t reset_reason = esp_reset_reason();
+
+    // Only preserve alarm state for watchdog resets
+    if (reset_reason != ESP_RST_TASK_WDT && reset_reason != ESP_RST_WDT) {
+        preferences.begin(PREF_NAMESPACE, false);
+        preferences.putBool(ALARM_TRIGGERED_KEY, false);
+        preferences.end();
+        Serial.println("Non-watchdog reset detected - resetting alarm state");
+    } else {
+        Serial.println("Watchdog reset detected - preserving alarm state");
+    }
+}
+
+bool was_alarm_triggered() {
+    if (!preferences.begin(PREF_NAMESPACE, true)) {
+        return false;
+    }
+
+    bool triggered = preferences.getBool(ALARM_TRIGGERED_KEY, false);
+    preferences.end();
+
+    Serial.printf("Checking alarm state: %s\n", triggered ? "triggered" : "not triggered");
+    return triggered;
+}
+
+void mark_alarm_triggered() {
+    if (!preferences.begin(PREF_NAMESPACE, false)) {
+        return;
+    }
+
+    preferences.putBool(ALARM_TRIGGERED_KEY, true);
+    preferences.end();
+
+    Serial.println("Marked alarm as triggered");
+}
+
+void reset_alarm_state() {
+    if (!preferences.begin(PREF_NAMESPACE, false)) {
+        return;
+    }
+
+    preferences.putBool(ALARM_TRIGGERED_KEY, false);
+    preferences.end();
+
+    Serial.println("Reset alarm state for next session");
 }
 
 void reconnect() {
@@ -60,14 +116,13 @@ void publishMessage(const char* message) {
 }
 
 void printAndPublish(bool isConnected, const char* format, ...) {
-    String currentTime = getDateTimeForFormat("g:i:s A");
     char buffer[256];
     va_list args;
     va_start(args, format);
     vsnprintf(buffer, sizeof(buffer), format, args);
     va_end(args);
 
-    String message = "[" + currentTime + "] " + buffer;
+    String message = buffer;
     if (enableDebug) {
         Serial.println(message);
     }
@@ -84,9 +139,8 @@ void notifyWaterGone() {
 }
 
 void blinkLed(void *parameter) {
-    // Configure Watchdog Timer
-    esp_task_wdt_init(WDT_TIMEOUT, true); // Enable panic so ESP32 restarts
-    esp_task_wdt_add(NULL); // Add current thread to WDT watch
+    esp_task_wdt_init(WDT_TIMEOUT, true);
+    esp_task_wdt_add(NULL);
 
     pinMode(LED_PIN, OUTPUT);
     while (shouldBlink) {
@@ -119,7 +173,7 @@ String createStatusUpdate(const String& status, const String& date) {
 
     String jsonString;
     serializeJson(jsonDoc, jsonString);
-    printAndPublish(true, "Status update: %s", jsonString.c_str());
+//    printAndPublish(true, "Status update: %s", jsonString.c_str());
     return jsonString;
 }
 
@@ -127,11 +181,9 @@ String makePOSTRequest(String jsonData, String apiUrl) {
     HTTPClient http;
     String payload;
 
-    printAndPublish(true, "Connecting to API endpoint...");
     http.begin(std::move(apiUrl));
 
     http.addHeader("Content-Type", "application/json");
-    printAndPublish(true, "Sending HTTP POST request...");
     int httpResponseCode = http.POST(std::move(jsonData));
 
     if (httpResponseCode > 0) {
@@ -156,11 +208,9 @@ void startWireless() {
     printAndPublish(false, "Connecting to WiFi After Waking up...");
     Blynk.begin(auth, ssid, password);
     waitForSync();
-    India.setLocation(F("Asia/Kolkata"));
     espClient.setCACert(root_ca);
     client.setServer(mqtt_server, mqtt_port);
     xTaskCreate(customLoop, "customLoop", 30000, NULL, 1, NULL);
-    printAndPublish(true, "Connected to WiFi");
 }
 
 void triggerSound(void *parameter) {
@@ -175,14 +225,6 @@ void triggerSound(void *parameter) {
 }
 
 void IRAM_ATTR triggerSoundOff() {
-    static unsigned long lastTriggerTime = 0;
-    unsigned long now = millis();
-
-    if (now - lastTriggerTime < DEBOUNCE_DELAY) {
-        return;
-    }
-
-    lastTriggerTime = now;
     gpio_set_level(gpio_num_t(RELAY_PIN), 0);
 }
 
@@ -211,19 +253,20 @@ void handleHighState() {
     if (trigger == 0) {
         shouldBlink = true;
         printAndPublish(false, "starting wake up sequence");
-
-        // trigger sound and start blink led
-        xTaskCreate(triggerSound, "triggerSound", 1000, NULL, 1, NULL);
         xTaskCreate(blinkLed, "blinkLed", 1000, NULL, 1, NULL);
 
-        // start wireless connection
-        startWireless();
+        // Only trigger sound if it hasn't been triggered in this session
+        if (!was_alarm_triggered()) {
+            xTaskCreate(triggerSound, "triggerSound", 1000, NULL, 1, NULL);
+            mark_alarm_triggered();  // Mark that we've triggered the alarm
+        }
 
-        // Send start signal to API
+        startWireless();
         sendStatusToAPI("start");
+        printAndPublish(true, "Established connectivity");
     }
     trigger = 1;
-    printAndPublish(true, "sensor is HIGH");
+    printAndPublish(true, "1");
     delay(5000);
 }
 
@@ -231,10 +274,8 @@ void handleLowState() {
     if (digitalRead(GPIO_NUM_33) == LOW && trigger) {
         notifyWaterGone();
         printAndPublish(true, "ending wake up sequence");
-
-        // Send end signal to API
         sendStatusToAPI("end");
-
+        reset_alarm_state();  // Reset the alarm state for next water session
         trigger = 0;
     }
 }
@@ -267,11 +308,11 @@ BLYNK_WRITE(V0) {
     }
 }
 
-void sensor_woke_up() {
+void esp_woke_up() {
     int value = 1;
     if(xQueueSend(queue, &value, pdMS_TO_TICKS(60000)) == pdPASS) {
         if (digitalRead(GPIO_NUM_33) == HIGH ) {
-            printAndPublish(false, "processTrigger called from sensor_woke_up");
+            printAndPublish(false, "processTrigger called from esp_woke_up");
             processTrigger();
         } else {
             printAndPublish(false, "waiting for sensor to be HIGH");
@@ -285,6 +326,8 @@ void sensor_woke_up() {
 
 void setup() {
     Serial.begin(115200);
+
+    ESP_ERROR_CHECK(esp_register_shutdown_handler(shutdown_handler));
 
     // Initialize pins
     pinMode(LED_PIN, OUTPUT);
@@ -303,7 +346,7 @@ void setup() {
 
     // Configure deep sleep wakeup
     esp_sleep_enable_ext0_wakeup(GPIO_NUM_33, 1);
-    sensor_woke_up();
+    esp_woke_up();
 
     printAndPublish(false, "going to sleep now");
     esp_deep_sleep_start();
