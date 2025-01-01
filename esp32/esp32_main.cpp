@@ -324,10 +324,26 @@ void esp_woke_up() {
     }
 }
 
+void check_reset_reason() {
+    esp_reset_reason_t reset_reason = esp_reset_reason();
+
+    preferences.begin(PREF_NAMESPACE, false);
+
+    if (reset_reason != ESP_RST_TASK_WDT && reset_reason != ESP_RST_WDT) {
+        preferences.putBool(ALARM_TRIGGERED_KEY, false);
+        Serial.printf("Abnormal reset detected (reason: %d) - resetting alarm state\n", reset_reason);
+    } else {
+        Serial.println("Watchdog reset detected - preserving alarm state");
+    }
+
+    preferences.end();
+}
+
 void setup() {
     Serial.begin(115200);
 
     ESP_ERROR_CHECK(esp_register_shutdown_handler(shutdown_handler));
+    check_reset_reason();
 
     // Initialize pins
     pinMode(LED_PIN, OUTPUT);
