@@ -43,19 +43,6 @@ String getDateTimeForFormat(const String& format) {
     return India.dateTime(format);
 }
 
-void shutdown_handler() {
-    esp_reset_reason_t reset_reason = esp_reset_reason();
-
-    // Only preserve alarm state for watchdog resets
-    if (reset_reason != ESP_RST_TASK_WDT && reset_reason != ESP_RST_WDT) {
-        preferences.begin(PREF_NAMESPACE, false);
-        preferences.putBool(ALARM_TRIGGERED_KEY, false);
-        preferences.end();
-        Serial.println("Non-watchdog reset detected - resetting alarm state");
-    } else {
-        Serial.println("Watchdog reset detected - preserving alarm state");
-    }
-}
 
 bool was_alarm_triggered() {
     if (!preferences.begin(PREF_NAMESPACE, true)) {
@@ -324,10 +311,30 @@ void esp_woke_up() {
     }
 }
 
+void check_reset_reason() {
+    esp_reset_reason_t reset_reason = esp_reset_reason();
+
+    preferences.begin(PREF_NAMESPACE, false);
+
+    if (reset_reason != ESP_RST_TASK_WDT && reset_reason != ESP_RST_WDT && reset_reason != ESP_RST_POWERON) {
+        // Only reset if alarm was actually triggered
+        if (preferences.getBool(ALARM_TRIGGERED_KEY, false)) {
+            preferences.putBool(ALARM_TRIGGERED_KEY, false);
+            Serial.printf("Abnormal reset detected (reason: %d) - resetting alarm state\n", reset_reason);
+        } else {
+            Serial.printf("Abnormal reset detected (reason: %d) - alarm was not triggered\n", reset_reason);
+        }
+    } else {
+        Serial.printf("Normal reset detected (reason: %d) - preserving alarm state\n", reset_reason);
+    }
+
+    preferences.end();
+}
+
 void setup() {
     Serial.begin(115200);
 
-    ESP_ERROR_CHECK(esp_register_shutdown_handler(shutdown_handler));
+    check_reset_reason();
 
     // Initialize pins
     pinMode(LED_PIN, OUTPUT);
