@@ -194,10 +194,16 @@ void sendStatusToAPI(const String& status) {
 void startWireless() {
     printAndPublish(false, "Connecting to WiFi After Waking up...");
     Blynk.begin(auth, ssid, password);
+    xTaskCreate(
+            customLoop,
+            "customLoop",
+            30000,
+            NULL,
+            1,
+            NULL);
     waitForSync();
     espClient.setCACert(root_ca);
     client.setServer(mqtt_server, mqtt_port);
-    xTaskCreate(customLoop, "customLoop", 30000, NULL, 1, NULL);
 }
 
 void triggerSound(void *parameter) {
@@ -238,7 +244,6 @@ void waitForSensorState(int state, unsigned long duration, const char* message, 
 
 void handleHighState() {
     if (trigger == 0) {
-        shouldBlink = true;
         printAndPublish(false, "starting wake up sequence");
         xTaskCreate(blinkLed, "blinkLed", 1000, NULL, 1, NULL);
 
@@ -274,6 +279,7 @@ void processTrigger() {
     waitForSensorState(HIGH, 10000, "sensor was HIGH for last 10 seconds, triggering wake up sequence", false);
 
     while (digitalRead(GPIO_NUM_33) == HIGH) {
+        shouldBlink = true;
         handleHighState();
     }
 
