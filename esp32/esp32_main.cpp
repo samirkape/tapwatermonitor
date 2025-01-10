@@ -10,7 +10,6 @@
 #include "esp_task_wdt.h"
 #include "esp_panic.h"
 #include "Preferences.h"
-
 #include <utility>
 #include "esp_err.h"
 
@@ -21,7 +20,7 @@ const int RELAY_PIN = 25;
 const int RELAY_TURN_OFF_BUTTON = 26;
 volatile bool shouldBlink = false;
 const int mqtt_port = 8883;
-const int WDT_TIMEOUT = 15; // Watchdog timeout in seconds
+const int WDT_TIMEOUT = 25; // Watchdog timeout in seconds
 
 // Global objects
 WiFiClientSecure espClient;
@@ -80,7 +79,7 @@ void reset_alarm_state() {
 
 void reconnect() {
     while (!client.connected()) {
-        Serial.print("Attempting MQTT connection… ");
+        Serial.print("Attempting MQTT connection... ");
         String clientId = "ESP32Client";
         if (client.connect(clientId.c_str(), mqtt_username, mqtt_password)) {
             Serial.println("connected!");
@@ -126,33 +125,41 @@ void notifyWaterGone() {
 }
 
 void blinkLed(void *parameter) {
-    esp_task_wdt_init(WDT_TIMEOUT, true);
-    esp_task_wdt_add(NULL);
+    if (esp_task_wdt_add(NULL) != ESP_OK) {
+        Serial.println("Error adding blinkLed to WDT");
+        vTaskDelete(NULL);
+        return;
+    }
 
     pinMode(LED_PIN, OUTPUT);
-    while (shouldBlink) {
+    while (1) {
         digitalWrite(LED_PIN, HIGH);
         vTaskDelay(500 / portTICK_PERIOD_MS);
         digitalWrite(LED_PIN, LOW);
         vTaskDelay(500 / portTICK_PERIOD_MS);
-        esp_task_wdt_reset(); // Reset watchdog timer
+        esp_task_wdt_reset();
     }
-    digitalWrite(LED_PIN, LOW);
-    esp_task_wdt_delete(NULL); // Remove thread from WDT watch
-    vTaskDelete(nullptr);
 }
 
 void customLoop(void *parameter) {
+    if (esp_task_wdt_add(NULL) != ESP_OK) {
+        Serial.println("Error adding customLoop to WDT");
+        vTaskDelete(NULL);
+        return;
+    }
+
     while (shouldBlink) {
         Blynk.run();
         client.loop();
         vTaskDelay(20 / portTICK_PERIOD_MS);
+        esp_task_wdt_reset();
     }
-    printAndPublish("Releasing Blynk and HiveMqtt Task");
-    vTaskDelete(nullptr);
+
+    printAndPublish(true, "Releasing Blynk and HiveMqtt Task");
+    esp_task_wdt_delete(NULL);
+    vTaskDelete(NULL);
 }
 
-// Simplified JSON creation for status updates
 String createStatusUpdate(const String& status, const String& date) {
     JsonDocument jsonDoc;
     jsonDoc["status"] = status;
@@ -160,7 +167,6 @@ String createStatusUpdate(const String& status, const String& date) {
 
     String jsonString;
     serializeJson(jsonDoc, jsonString);
-//    printAndPublish(true, "Status update: %s", jsonString.c_str());
     return jsonString;
 }
 
@@ -169,7 +175,6 @@ String makePOSTRequest(String jsonData, String apiUrl) {
     String payload;
 
     http.begin(std::move(apiUrl));
-
     http.addHeader("Content-Type", "application/json");
     int httpResponseCode = http.POST(std::move(jsonData));
 
@@ -214,7 +219,7 @@ void triggerSound(void *parameter) {
     } else {
         digitalWrite(RELAY_PIN, HIGH);
     }
-    vTaskDelete(nullptr);
+    vTaskDelete(NULL);
 }
 
 void IRAM_ATTR triggerSoundOff() {
@@ -222,6 +227,8 @@ void IRAM_ATTR triggerSoundOff() {
 }
 
 void waitForSensorState(int state, unsigned long duration, const char* message, bool isConnected) {
+    xTaskCreate(blinkLed, "blinkLed", 1000, nullptr, 1, nullptr);
+
     unsigned long startTime = 0;
     while (true) {
         if (digitalRead(GPIO_NUM_33) == state) {
@@ -245,12 +252,10 @@ void waitForSensorState(int state, unsigned long duration, const char* message, 
 void handleHighState() {
     if (trigger == 0) {
         printAndPublish(false, "starting wake up sequence");
-        xTaskCreate(blinkLed, "blinkLed", 1000, NULL, 1, NULL);
 
-        // Only trigger sound if it hasn't been triggered in this session
         if (!was_alarm_triggered()) {
             xTaskCreate(triggerSound, "triggerSound", 1000, NULL, 1, NULL);
-            mark_alarm_triggered();  // Mark that we've triggered the alarm
+            mark_alarm_triggered();
         }
 
         startWireless();
@@ -267,7 +272,7 @@ void handleLowState() {
         notifyWaterGone();
         printAndPublish(true, "ending wake up sequence");
         sendStatusToAPI("end");
-        reset_alarm_state();  // Reset the alarm state for next water session
+        reset_alarm_state();
         trigger = 0;
     }
 }
@@ -275,22 +280,21 @@ void handleLowState() {
 void processTrigger() {
     int value;
 
-    // confirm that the sensor is high
     waitForSensorState(HIGH, 10000, "sensor was HIGH for last 10 seconds, triggering wake up sequence", false);
 
     while (digitalRead(GPIO_NUM_33) == HIGH) {
         shouldBlink = true;
         handleHighState();
+        vTaskDelay(100 / portTICK_PERIOD_MS);
     }
 
-    // confirm that the sensor is low
     waitForSensorState(LOW, 35000, "sensor was LOW for last 35 seconds, ending wake up sequence", true);
-
     handleLowState();
 
     xQueueReceive(queue, &value, 0);
     printAndPublish(true, "releasing queue value: %d", value);
     shouldBlink = false;
+    esp_deep_sleep_start();
 }
 
 BLYNK_WRITE(V0) {
@@ -323,7 +327,6 @@ void check_reset_reason() {
     preferences.begin(PREF_NAMESPACE, false);
 
     if (reset_reason != ESP_RST_TASK_WDT && reset_reason != ESP_RST_WDT && reset_reason != ESP_RST_POWERON) {
-        // Only reset if alarm was actually triggered
         if (preferences.getBool(ALARM_TRIGGERED_KEY, false)) {
             preferences.putBool(ALARM_TRIGGERED_KEY, false);
             Serial.printf("Abnormal reset detected (reason: %d) - resetting alarm state\n", reset_reason);
@@ -341,6 +344,9 @@ void setup() {
     Serial.begin(115200);
 
     check_reset_reason();
+
+    // Initialize global watchdog timer
+    esp_task_wdt_init(WDT_TIMEOUT, true);
 
     // Initialize pins
     pinMode(LED_PIN, OUTPUT);
