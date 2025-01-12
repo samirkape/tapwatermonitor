@@ -32,8 +32,11 @@ QueueHandle_t queue;
 Preferences preferences;
 
 const char* PREF_NAMESPACE = "wdt";
-const char* WATCHDOG_RESET_KEY = "reset_count";
 const char* ALARM_TRIGGERED_KEY = "alarm_triggered";
+TaskHandle_t blinkTaskHandle = NULL;
+TaskHandle_t wirelessTaskHandle = NULL;
+TaskHandle_t customLoopTaskHandle = NULL;
+
 
 // Forward declarations of functions used before their definition
 void printAndPublish(bool isConnected = true, const char* format = "", ...);
@@ -42,6 +45,31 @@ String getDateTimeForFormat(const String& format) {
     return India.dateTime(format);
 }
 
+void cleanupTasks() {
+    if (blinkTaskHandle != NULL) {
+        esp_task_wdt_delete(NULL);
+        vTaskDelete(blinkTaskHandle);
+        blinkTaskHandle = NULL;
+    }
+
+    if (wirelessTaskHandle != NULL) {
+        esp_task_wdt_delete(NULL);
+        vTaskDelete(wirelessTaskHandle);
+        wirelessTaskHandle = NULL;
+    }
+
+    if (customLoopTaskHandle != NULL) {
+        esp_task_wdt_delete(NULL);
+        vTaskDelete(customLoopTaskHandle);
+        customLoopTaskHandle = NULL;
+    }
+
+    int value;
+    xQueueReceive(queue, &value, 0);
+    printAndPublish(false, "releasing queue value in cleanup: %d", value);
+
+    shouldBlink = false;
+}
 
 bool was_alarm_triggered() {
     if (!preferences.begin(PREF_NAMESPACE, true)) {
@@ -196,19 +224,68 @@ void sendStatusToAPI(const String& status) {
     makePOSTRequest(jsonData, tapWaterAPI);
 }
 
-void startWireless() {
+//void startWireless() {
+//    printAndPublish(false, "Connecting to WiFi After Waking up...");
+//    Blynk.begin(auth, ssid, password);
+//    xTaskCreate(
+//            customLoop,
+//            "customLoop",
+//            30000,
+//            NULL,
+//            1,
+//            NULL);
+//    waitForSync();
+//    espClient.setCACert(root_ca);
+//    client.setServer(mqtt_server, mqtt_port);
+//}
+
+
+void wirelessTask(void *parameter) {
+    if (esp_task_wdt_add(NULL) != ESP_OK) {
+        Serial.println("Error adding wirelessTask to WDT");
+        vTaskDelete(NULL);
+        return;
+    }
+
     printAndPublish(false, "Connecting to WiFi After Waking up...");
     Blynk.begin(auth, ssid, password);
+
     xTaskCreate(
             customLoop,
             "customLoop",
             30000,
             NULL,
             1,
-            NULL);
+            &customLoopTaskHandle);
+
     waitForSync();
     espClient.setCACert(root_ca);
     client.setServer(mqtt_server, mqtt_port);
+
+    while(1) {
+        esp_task_wdt_reset();
+        vTaskDelay(100 / portTICK_PERIOD_MS);
+    }
+}
+
+void startWireless() {
+    xTaskCreate(
+            wirelessTask,
+            "wirelessTask",
+            10000,
+            NULL,
+            1,
+            &wirelessTaskHandle);
+}
+
+void blinkLed() {
+    xTaskCreate(
+            blinkLed,
+            "blinkLed",
+            1000,
+            nullptr,
+            1,
+            &blinkTaskHandle);
 }
 
 void triggerSound(void *parameter) {
@@ -226,18 +303,29 @@ void IRAM_ATTR triggerSoundOff() {
     gpio_set_level(gpio_num_t(RELAY_PIN), 0);
 }
 
-void waitForSensorState(int state, unsigned long duration, const char* message, bool isConnected) {
-    xTaskCreate(blinkLed, "blinkLed", 1000, nullptr, 1, nullptr);
-
+bool waitForSensorState(int state, unsigned long duration, const char* message, bool isConnected) {
+    unsigned long totalWaitStart = millis();
+    const unsigned long TOTAL_TIMEOUT = 60000; // 1 minute timeout
     unsigned long startTime = 0;
+
+    if ( state == HIGH ) {
+        blinkLed();
+        startWireless();
+    }
+
     while (true) {
+        if (millis() - totalWaitStart >= TOTAL_TIMEOUT) {
+            printAndPublish(isConnected, "Timeout waiting for sensor state");
+            cleanupTasks();
+            return false;
+        }
+
         if (digitalRead(GPIO_NUM_33) == state) {
             if (startTime == 0) {
                 startTime = millis();
             } else if (millis() - startTime >= duration) {
                 printAndPublish(isConnected, message);
-                startTime = 0;
-                break;
+                return true;
             }
             delay(2000);
             int remainingTime = (duration / 1000) - ((millis() - startTime) / 1000);
@@ -258,13 +346,12 @@ void handleHighState() {
             mark_alarm_triggered();
         }
 
-        startWireless();
         sendStatusToAPI("start");
         printAndPublish(true, "Established connectivity");
     }
     trigger = 1;
     printAndPublish(true, "1");
-    delay(5000);
+    vTaskDelay(5000 / portTICK_PERIOD_MS);
 }
 
 void handleLowState() {
@@ -278,22 +365,22 @@ void handleLowState() {
 }
 
 void processTrigger() {
-    int value;
-
-    waitForSensorState(HIGH, 10000, "sensor was HIGH for last 10 seconds, triggering wake up sequence", false);
+    if (!waitForSensorState(HIGH, 10000, "sensor was HIGH for last 10 seconds, triggering wake up sequence", false)) {
+        esp_deep_sleep_start();
+    }
 
     while (digitalRead(GPIO_NUM_33) == HIGH) {
         shouldBlink = true;
         handleHighState();
-        vTaskDelay(100 / portTICK_PERIOD_MS);
     }
 
-    waitForSensorState(LOW, 35000, "sensor was LOW for last 35 seconds, ending wake up sequence", true);
-    handleLowState();
+    if (!waitForSensorState(LOW, 35000, "sensor was LOW for last 35 seconds, ending wake up sequence", true)) {
+        cleanupTasks();
+        esp_deep_sleep_start();
+    }
 
-    xQueueReceive(queue, &value, 0);
-    printAndPublish(true, "releasing queue value: %d", value);
-    shouldBlink = false;
+    handleLowState();
+    cleanupTasks();
     esp_deep_sleep_start();
 }
 
