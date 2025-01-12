@@ -12,6 +12,7 @@
 #include "Preferences.h"
 #include <utility>
 #include "esp_err.h"
+#include <WiFi.h>
 
 // Constants
 volatile int trigger = 0;
@@ -32,8 +33,14 @@ QueueHandle_t queue;
 Preferences preferences;
 
 const char* PREF_NAMESPACE = "wdt";
-const char* WATCHDOG_RESET_KEY = "reset_count";
 const char* ALARM_TRIGGERED_KEY = "alarm_triggered";
+TaskHandle_t blinkTaskHandle = NULL;
+TaskHandle_t wirelessTaskHandle = NULL;
+TaskHandle_t customLoopTaskHandle = NULL;
+
+bool isConnected() {
+    return WiFiClass::status() == WL_CONNECTED;
+}
 
 // Forward declarations of functions used before their definition
 void printAndPublish(bool isConnected = true, const char* format = "", ...);
@@ -42,6 +49,31 @@ String getDateTimeForFormat(const String& format) {
     return India.dateTime(format);
 }
 
+void cleanupTasks() {
+    if (blinkTaskHandle != NULL) {
+        esp_task_wdt_delete(NULL);
+        vTaskDelete(blinkTaskHandle);
+        blinkTaskHandle = NULL;
+    }
+
+    if (wirelessTaskHandle != NULL) {
+        esp_task_wdt_delete(NULL);
+        vTaskDelete(wirelessTaskHandle);
+        wirelessTaskHandle = NULL;
+    }
+
+    if (customLoopTaskHandle != NULL) {
+        esp_task_wdt_delete(NULL);
+        vTaskDelete(customLoopTaskHandle);
+        customLoopTaskHandle = NULL;
+    }
+
+    int value;
+    xQueueReceive(queue, &value, 0);
+    printAndPublish(isConnected(), "releasing queue value in cleanup: %d", value);
+
+    shouldBlink = false;
+}
 
 bool was_alarm_triggered() {
     if (!preferences.begin(PREF_NAMESPACE, true)) {
@@ -64,6 +96,7 @@ void mark_alarm_triggered() {
     preferences.end();
 
     Serial.println("Marked alarm as triggered");
+    WiFiClass::status();
 }
 
 void reset_alarm_state() {
@@ -118,7 +151,7 @@ void printAndPublish(bool isConnected, const char* format, ...) {
 }
 
 void notifyWaterGone() {
-    printAndPublish(true, "water has gone at: %s", getDateTimeForFormat("g:i A").c_str());
+    printAndPublish(isConnected(), "water has gone at: %s", getDateTimeForFormat("g:i A").c_str());
     digitalWrite(RELAY_PIN, HIGH);
     vTaskDelay(5000 / portTICK_PERIOD_MS);
     digitalWrite(RELAY_PIN, LOW);
@@ -155,7 +188,7 @@ void customLoop(void *parameter) {
         esp_task_wdt_reset();
     }
 
-    printAndPublish(true, "Releasing Blynk and HiveMqtt Task");
+    printAndPublish(isConnected(), "Releasing Blynk and HiveMqtt Task");
     esp_task_wdt_delete(NULL);
     vTaskDelete(NULL);
 }
@@ -179,11 +212,11 @@ String makePOSTRequest(String jsonData, String apiUrl) {
     int httpResponseCode = http.POST(std::move(jsonData));
 
     if (httpResponseCode > 0) {
-        printAndPublish(true, "HTTP Response code: %s", String(httpResponseCode).c_str());
+        printAndPublish(isConnected(), "HTTP Response code: %s", String(httpResponseCode).c_str());
         payload = http.getString();
-        printAndPublish(true, "makePOSTRequest payload: %s", payload.c_str());
+        printAndPublish(isConnected(), "makePOSTRequest payload: %s", payload.c_str());
     } else {
-        printAndPublish(true, "Error code: %s", String(httpResponseCode).c_str());
+        printAndPublish(isConnected(), "Error code: %s", String(httpResponseCode).c_str());
     }
 
     http.end();
@@ -196,19 +229,68 @@ void sendStatusToAPI(const String& status) {
     makePOSTRequest(jsonData, tapWaterAPI);
 }
 
-void startWireless() {
-    printAndPublish(false, "Connecting to WiFi After Waking up...");
+//void startWireless() {
+//    printAndPublish(false, "Connecting to WiFi After Waking up...");
+//    Blynk.begin(auth, ssid, password);
+//    xTaskCreate(
+//            customLoop,
+//            "customLoop",
+//            30000,
+//            NULL,
+//            1,
+//            NULL);
+//    waitForSync();
+//    espClient.setCACert(root_ca);
+//    client.setServer(mqtt_server, mqtt_port);
+//}
+
+
+void wirelessTask(void *parameter) {
+    if (esp_task_wdt_add(NULL) != ESP_OK) {
+        Serial.println("Error adding wirelessTask to WDT");
+        vTaskDelete(NULL);
+        return;
+    }
+
+    printAndPublish(isConnected(), "Connecting to WiFi After Waking up...");
     Blynk.begin(auth, ssid, password);
+
     xTaskCreate(
             customLoop,
             "customLoop",
             30000,
             NULL,
             1,
-            NULL);
+            &customLoopTaskHandle);
+
     waitForSync();
     espClient.setCACert(root_ca);
     client.setServer(mqtt_server, mqtt_port);
+
+    while(1) {
+        esp_task_wdt_reset();
+        vTaskDelay(100 / portTICK_PERIOD_MS);
+    }
+}
+
+void startWireless() {
+    xTaskCreate(
+            wirelessTask,
+            "wirelessTask",
+            10000,
+            NULL,
+            1,
+            &wirelessTaskHandle);
+}
+
+void blinkLed() {
+    xTaskCreate(
+            blinkLed,
+            "blinkLed",
+            1000,
+            nullptr,
+            1,
+            &blinkTaskHandle);
 }
 
 void triggerSound(void *parameter) {
@@ -226,22 +308,33 @@ void IRAM_ATTR triggerSoundOff() {
     gpio_set_level(gpio_num_t(RELAY_PIN), 0);
 }
 
-void waitForSensorState(int state, unsigned long duration, const char* message, bool isConnected) {
-    xTaskCreate(blinkLed, "blinkLed", 1000, nullptr, 1, nullptr);
-
+bool waitForSensorState(int state, unsigned long duration, const char* message) {
+    unsigned long totalWaitStart = millis();
+    const unsigned long TOTAL_TIMEOUT = 60000; // 1 minute timeout
     unsigned long startTime = 0;
+
+    if ( state == HIGH ) {
+        blinkLed();
+        startWireless();
+    }
+
     while (true) {
+        if (millis() - totalWaitStart >= TOTAL_TIMEOUT) {
+            printAndPublish(isConnected(), "Timeout waiting for sensor state");
+            cleanupTasks();
+            return false;
+        }
+
         if (digitalRead(GPIO_NUM_33) == state) {
             if (startTime == 0) {
                 startTime = millis();
             } else if (millis() - startTime >= duration) {
-                printAndPublish(isConnected, message);
-                startTime = 0;
-                break;
+                printAndPublish(isConnected(), message);
+                return true;
             }
             delay(2000);
             int remainingTime = (duration / 1000) - ((millis() - startTime) / 1000);
-            printAndPublish(isConnected, "sensor is %s, waiting for %d seconds",
+            printAndPublish(isConnected(), "sensor is %s, waiting for %d seconds",
                             state == HIGH ? "HIGH" : "LOW", remainingTime);
         } else {
             startTime = 0;
@@ -251,26 +344,25 @@ void waitForSensorState(int state, unsigned long duration, const char* message, 
 
 void handleHighState() {
     if (trigger == 0) {
-        printAndPublish(false, "starting wake up sequence");
+        printAndPublish(isConnected(), "starting wake up sequence");
 
         if (!was_alarm_triggered()) {
             xTaskCreate(triggerSound, "triggerSound", 1000, NULL, 1, NULL);
             mark_alarm_triggered();
         }
 
-        startWireless();
         sendStatusToAPI("start");
-        printAndPublish(true, "Established connectivity");
+        printAndPublish(isConnected(), "Established connectivity");
     }
     trigger = 1;
-    printAndPublish(true, "1");
-    delay(5000);
+    printAndPublish(isConnected(), "1");
+    vTaskDelay(5000 / portTICK_PERIOD_MS);
 }
 
 void handleLowState() {
     if (digitalRead(GPIO_NUM_33) == LOW && trigger) {
         notifyWaterGone();
-        printAndPublish(true, "ending wake up sequence");
+        printAndPublish(isConnected(), "ending wake up sequence");
         sendStatusToAPI("end");
         reset_alarm_state();
         trigger = 0;
@@ -278,30 +370,30 @@ void handleLowState() {
 }
 
 void processTrigger() {
-    int value;
-
-    waitForSensorState(HIGH, 10000, "sensor was HIGH for last 10 seconds, triggering wake up sequence", false);
+    if (!waitForSensorState(HIGH, 10000, "sensor was HIGH for last 10 seconds, triggering wake up sequence")) {
+        esp_deep_sleep_start();
+    }
 
     while (digitalRead(GPIO_NUM_33) == HIGH) {
         shouldBlink = true;
         handleHighState();
-        vTaskDelay(100 / portTICK_PERIOD_MS);
     }
 
-    waitForSensorState(LOW, 35000, "sensor was LOW for last 35 seconds, ending wake up sequence", true);
-    handleLowState();
+    if (!waitForSensorState(LOW, 35000, "sensor was LOW for last 35 seconds, ending wake up sequence")) {
+        cleanupTasks();
+        esp_deep_sleep_start();
+    }
 
-    xQueueReceive(queue, &value, 0);
-    printAndPublish(true, "releasing queue value: %d", value);
-    shouldBlink = false;
+    handleLowState();
+    cleanupTasks();
     esp_deep_sleep_start();
 }
 
 BLYNK_WRITE(V0) {
     int pinValue = param.asInt();
     if (pinValue == 0) {
-        printAndPublish("received Blynk call to stop the alarm");
         digitalWrite(RELAY_PIN, LOW);
+        printAndPublish(isConnected(),"received Blynk call to stop the alarm");
     }
 }
 
@@ -309,15 +401,15 @@ void esp_woke_up() {
     int value = 1;
     if(xQueueSend(queue, &value, pdMS_TO_TICKS(60000)) == pdPASS) {
         if (digitalRead(GPIO_NUM_33) == HIGH ) {
-            printAndPublish(false, "processTrigger called from esp_woke_up");
+            printAndPublish(isConnected(), "processTrigger called from esp_woke_up");
             processTrigger();
         } else {
-            printAndPublish(false, "waiting for sensor to be HIGH");
+            printAndPublish(isConnected(), "waiting for sensor to be HIGH");
             xQueueReceive(queue, &value, 0);
-            printAndPublish(false, "releasing queue value: %d", value);
+            printAndPublish(isConnected(), "releasing queue value: %d", value);
         }
     } else {
-        printAndPublish(false, "waiting for queue to be empty");
+        printAndPublish(isConnected(), "waiting for queue to be empty");
     }
 }
 
@@ -367,7 +459,7 @@ void setup() {
     esp_sleep_enable_ext0_wakeup(GPIO_NUM_33, 1);
     esp_woke_up();
 
-    printAndPublish(false, "going to sleep now");
+    printAndPublish(isConnected(), "going to sleep now");
     esp_deep_sleep_start();
 }
 
