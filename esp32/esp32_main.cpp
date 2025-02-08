@@ -6,85 +6,120 @@
 #include "BlynkSimpleEsp32.h"
 #include "PubSubClient.h"
 #include <WiFiClientSecure.h>
-#include <Preferences.h>
 #include "esp_system.h"
 #include "esp_task_wdt.h"
-
+#include "esp_panic.h"
+#include "Preferences.h"
 #include <utility>
 #include "esp_err.h"
 
-// Constants
 volatile int trigger = 0;
 const int LED_PIN = 14;
 const int RELAY_PIN = 25;
 const int RELAY_TURN_OFF_BUTTON = 26;
 volatile bool shouldBlink = false;
 const int mqtt_port = 8883;
-const int WDT_TIMEOUT = 10;  // Watchdog timeout in seconds
+const int WDT_TIMEOUT = 25;
+const int BUTTON_CHECK_INTERVAL = 50;
 
 // Global objects
 WiFiClientSecure espClient;
 PubSubClient client(espClient);
 Timezone India;
-Preferences preferences;
 bool enableDebug = true;
 QueueHandle_t queue;
+volatile bool alarmActive = true;
 
-// WiFi event handler
-void onWiFiEvent(WiFiEvent_t event) {
-    switch (event) {
-        case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
-            Serial.print("[onWiFiEvent] WiFi begin failed ");
-            WiFi.begin(ssid, password);
-            break;
-        case ARDUINO_EVENT_WIFI_STA_GOT_IP:
-            printAndPublish(true, "[onWiFiEvent] WiFi reconnect succeeded");
-            break;
-        default:
-            break;
-    }
-}
+Preferences preferences;
 
-String getDateTimeForFormat(const String& format) {
+const char *PREF_NAMESPACE = "wdt";
+const char *ALARM_TRIGGERED_KEY = "alarm_triggered";
+
+// Forward declarations of functions used before their definition
+void printAndPublish(bool isConnected = true, const char *format = "", ...);
+
+String getDateTimeForFormat(const String &format) {
     return India.dateTime(format);
 }
 
+void buttonMonitorTask(void *parameter) {
+    const TickType_t xDelay = pdMS_TO_TICKS(BUTTON_CHECK_INTERVAL);
+    while (true) {
+        if (digitalRead(RELAY_TURN_OFF_BUTTON) == HIGH) {
+            digitalWrite(RELAY_PIN, LOW);
+            break;
+        }
+        vTaskDelay(xDelay);
+    }
+    vTaskDelete(nullptr);
+}
+
+bool was_alarm_triggered() {
+    if (!preferences.begin(PREF_NAMESPACE, true)) {
+        return false;
+    }
+
+    bool triggered = preferences.getBool(ALARM_TRIGGERED_KEY, false);
+    preferences.end();
+
+    Serial.printf("Checking alarm state: %s\n", triggered ? "triggered" : "not triggered");
+    return triggered;
+}
+
+void mark_alarm_triggered() {
+    if (!preferences.begin(PREF_NAMESPACE, false)) {
+        return;
+    }
+
+    preferences.putBool(ALARM_TRIGGERED_KEY, true);
+    preferences.end();
+
+    Serial.println("Marked alarm as triggered");
+}
+
+void reset_alarm_state() {
+    if (!preferences.begin(PREF_NAMESPACE, false)) {
+        return;
+    }
+
+    preferences.putBool(ALARM_TRIGGERED_KEY, false);
+    preferences.end();
+
+    Serial.println("Reset alarm state for next session");
+}
+
 void reconnect() {
-    for (int i = 0; i < 2; i++) {
-        Serial.print("Attempting MQTT connection… ");
+    while (!client.connected()) {
+        Serial.print("Attempting MQTT connection... ");
         String clientId = "ESP32Client";
-        if (!client.connected()) {
-            if (client.connect(clientId.c_str(), mqtt_username, mqtt_password)) {
-                Serial.println("connected!");
-                client.publish(mqtt_topic, "Successfully re-established mqtt connection");
-                client.subscribe(mqtt_topic);
-                break;
-            } else {
-                Serial.print("failed, rc = ");
-                Serial.print(client.state());
-                Serial.println(" try again in 5 seconds");
-                delay(1000);
-            }
+        if (client.connect(clientId.c_str(), mqtt_username, mqtt_password)) {
+            Serial.println("connected!");
+            client.publish(mqtt_topic, "Sent from the other world");
+            client.subscribe(mqtt_topic);
+        } else {
+            Serial.print("failed, rc = ");
+            Serial.print(client.state());
+            Serial.println(" try again in 5 seconds");
+            delay(5000);
         }
     }
 }
 
-void publishMessage(const char* message) {
+void publishMessage(const char *message) {
     if (!client.connected()) {
         reconnect();
     }
     client.publish(mqtt_topic, message);
 }
 
-void printAndPublish(bool isConnected = true, const char* format = "", ...) {
-    String currentTime = getDateTimeForFormat("g:i:s A");
+void printAndPublish(bool isConnected, const char *format, ...) {
     char buffer[256];
     va_list args;
     va_start(args, format);
     vsnprintf(buffer, sizeof(buffer), format, args);
     va_end(args);
 
-    String message = "[" + currentTime + "] " + buffer;
+    String message = buffer;
     if (enableDebug) {
         Serial.println(message);
     }
@@ -100,49 +135,49 @@ void notifyWaterGone() {
     digitalWrite(RELAY_PIN, LOW);
 }
 
-void triggerSound() {
-    digitalWrite(RELAY_PIN, HIGH);
-    while (true) {
-        if (digitalRead(RELAY_PIN) == LOW) {
-            break;
-        }
-        delay(1000);
-    }
-}
-
 void blinkLed(void *parameter) {
-    esp_task_wdt_add(nullptr);
+    if (esp_task_wdt_add(nullptr) != ESP_OK) {
+        Serial.println("Error adding blinkLed to WDT");
+        vTaskDelete(nullptr);
+        return;
+    }
+
     pinMode(LED_PIN, OUTPUT);
-    while (shouldBlink) {
-        esp_task_wdt_reset();
+    while (1) {
         digitalWrite(LED_PIN, HIGH);
         vTaskDelay(500 / portTICK_PERIOD_MS);
         digitalWrite(LED_PIN, LOW);
         vTaskDelay(500 / portTICK_PERIOD_MS);
+        esp_task_wdt_reset();
     }
-    digitalWrite(LED_PIN, LOW);
-    vTaskDelete(nullptr);
 }
 
 void customLoop(void *parameter) {
+    if (esp_task_wdt_add(nullptr) != ESP_OK) {
+        Serial.println("Error adding customLoop to WDT");
+        vTaskDelete(nullptr);
+        return;
+    }
+
     while (shouldBlink) {
         Blynk.run();
         client.loop();
         vTaskDelay(20 / portTICK_PERIOD_MS);
+        esp_task_wdt_reset();
     }
+
     printAndPublish(true, "Releasing Blynk and HiveMqtt Task");
+    esp_task_wdt_delete(nullptr);
     vTaskDelete(nullptr);
 }
 
-// Simplified JSON creation for status updates
-String createStatusUpdate(const String& status, const String& date) {
+String createStatusUpdate(const String &status, const String &date) {
     JsonDocument jsonDoc;
     jsonDoc["status"] = status;
     jsonDoc["date"] = date;
 
     String jsonString;
     serializeJson(jsonDoc, jsonString);
-    printAndPublish(true, "Status update: %s", jsonString.c_str());
     return jsonString;
 }
 
@@ -150,14 +185,11 @@ String makePOSTRequest(String jsonData, String apiUrl) {
     HTTPClient http;
     String payload;
 
-    printAndPublish(true, "Connecting to API endpoint...");
     http.begin(std::move(apiUrl));
-
     http.addHeader("Content-Type", "application/json");
-    printAndPublish(true, "Sending HTTP POST request...");
     int httpResponseCode = http.POST(std::move(jsonData));
 
-    if (httpResponseCode == 201) {
+    if (httpResponseCode > 0) {
         printAndPublish(true, "HTTP Response code: %s", String(httpResponseCode).c_str());
         payload = http.getString();
         printAndPublish(true, "makePOSTRequest payload: %s", payload.c_str());
@@ -169,7 +201,7 @@ String makePOSTRequest(String jsonData, String apiUrl) {
     return payload;
 }
 
-void sendStatusToAPI(const String& status) {
+void sendStatusToAPI(const String &status) {
     String date = getDateTimeForFormat("d-M-Y");
     String jsonData = createStatusUpdate(status, date);
     makePOSTRequest(jsonData, tapWaterAPI);
@@ -178,81 +210,117 @@ void sendStatusToAPI(const String& status) {
 void startWireless() {
     printAndPublish(false, "Connecting to WiFi After Waking up...");
     Blynk.begin(auth, ssid, password);
+    xTaskCreate(
+            customLoop,
+            "customLoop",
+            30000,
+            nullptr,
+            1,
+            nullptr);
     waitForSync();
-    India.setLocation(F("Asia/Kolkata"));
     espClient.setCACert(root_ca);
     client.setServer(mqtt_server, mqtt_port);
-    xTaskCreate(customLoop, "customLoop", 30000, NULL, 1, NULL);
-    printAndPublish(true, "Connected to WiFi, Blynk and Mqtt client");
 }
 
-void IRAM_ATTR triggerSoundOff() {
-    static unsigned long lastTriggerTime = 0;
-    unsigned long now = millis();
+void triggerSound(void *parameter) {
+    digitalWrite(RELAY_PIN, HIGH);
 
-    if (now - lastTriggerTime < DEBOUNCE_DELAY) {
-        return;
+    while (alarmActive) {
+        vTaskDelay(pdMS_TO_TICKS(100));  // Small delay to prevent tight loop
+        esp_task_wdt_reset();
     }
 
-    lastTriggerTime = now;
-    gpio_set_level(gpio_num_t(RELAY_PIN), 0);
+    digitalWrite(RELAY_PIN, LOW);
+    vTaskDelete(nullptr);
 }
 
-void waitForSensorState(int state, unsigned long duration, const char* message, bool isConnected) {
-    unsigned long startTime = 0;
+void waitForSensorState(int state, unsigned long duration, const char *message, bool isConnected) {
+    TaskHandle_t blinkTask = nullptr;
+    xTaskCreate(blinkLed, "blinkLed", 1000, nullptr, 1, &blinkTask);
+
+    const TickType_t checkInterval = pdMS_TO_TICKS(20);  // Check every 20ms for faster response
+    const unsigned long TIMEOUT_DURATION = 120000;        // 2 minutes timeout
+    unsigned long accumulatedTime = 0;                    // Total time in desired state
+    unsigned long totalWaitTime = 0;                      // Total time spent waiting
+    unsigned long lastCheckTime = millis();
+    unsigned long lastPrintTime = 0;                      // For throttling status messages
+    const unsigned long PRINT_INTERVAL = 2000;            // Print status every 2 seconds
+    const unsigned long MAX_INTERRUPTION = 5000;          // 5 seconds maximum interruption
+
+
     while (true) {
+        unsigned long currentTime = millis();
+        esp_task_wdt_reset();
+
+        unsigned long elapsedTime = currentTime - lastCheckTime;
+        lastCheckTime = currentTime;
+        totalWaitTime += elapsedTime;
+
+        if (totalWaitTime >= TIMEOUT_DURATION) {
+            printAndPublish(isConnected, "Timeout waiting for sensor state - going to sleep");
+            if (blinkTask) {
+                vTaskDelete(blinkTask);
+            }
+            esp_task_wdt_delete(nullptr);
+            esp_deep_sleep_start();
+        }
+
         if (digitalRead(GPIO_NUM_33) == state) {
-            if (startTime == 0) {
-                startTime = millis();
-            } else if (millis() - startTime >= duration) {
+            accumulatedTime += elapsedTime;
+
+            if (currentTime - lastPrintTime >= PRINT_INTERVAL) {
+                int remainingTime = (duration - accumulatedTime) / 1000;
+                int timeoutRemaining = (TIMEOUT_DURATION - totalWaitTime) / 1000;
+                printAndPublish(isConnected,
+                                "sensor is %s, accumulated time: %lu ms, need %d more seconds (timeout in %d seconds)",
+                                state == HIGH ? "HIGH" : "LOW",
+                                accumulatedTime,
+                                remainingTime,
+                                timeoutRemaining);
+                lastPrintTime = currentTime;
+            }
+
+            if (accumulatedTime >= duration) {
                 printAndPublish(isConnected, message);
-                startTime = 0;
                 break;
             }
-            delay(2000);
-            int remainingTime = (duration / 1000) - ((millis() - startTime) / 1000);
-            printAndPublish(isConnected, "sensor is %s, waiting for %d seconds",
-                          state == HIGH ? "HIGH" : "LOW", remainingTime);
         } else {
-            startTime = 0;
+            if (elapsedTime >= MAX_INTERRUPTION) {
+                if (accumulatedTime > 0) {
+                    printAndPublish(isConnected, "Signal interrupted for too long, resetting accumulated time");
+                    accumulatedTime = 0;
+                }
+            }
         }
+
+        vTaskDelay(checkInterval);
     }
 }
 
 void handleHighState() {
     if (trigger == 0) {
-        esp_task_wdt_add(nullptr);
-        shouldBlink = true;
-        bool alreadyAlarmed = preferences.getBool("alreadyAlarmed", false);
-        printAndPublish(false, "alreadyAlarmed: %s", alreadyAlarmed ? "true" : "false");
+        printAndPublish(false, "starting wake up sequence");
 
-        // trigger sound and start blink led
-        xTaskCreate(blinkLed, "blinkLed", 1000, NULL, 1, NULL);
-        if (!alreadyAlarmed) {
-            triggerSound();
-            preferences.putBool("alreadyAlarmed", true);
+        if (!was_alarm_triggered()) {
+            xTaskCreate(triggerSound, "triggerSound", 1000, nullptr, 1, nullptr);
+            mark_alarm_triggered();
         }
 
-        // start wireless connection
         startWireless();
-
-        // Send start signal to API
         sendStatusToAPI("start");
+        printAndPublish(true, "Established connectivity");
     }
     trigger = 1;
-    esp_task_wdt_reset();
-    printAndPublish(true, "sensor is in HIGH state");
-    delay(5000);
+    printAndPublish(true, "1");
+    vTaskDelay(5000);
 }
 
 void handleLowState() {
     if (digitalRead(GPIO_NUM_33) == LOW && trigger) {
         notifyWaterGone();
         printAndPublish(true, "ending wake up sequence");
-
-        // Send end signal to API
         sendStatusToAPI("end");
-
+        reset_alarm_state();
         trigger = 0;
     }
 }
@@ -260,37 +328,32 @@ void handleLowState() {
 void processTrigger() {
     int value;
 
-    // confirm that the sensor is high
     waitForSensorState(HIGH, 10000, "sensor was HIGH for last 10 seconds, triggering wake up sequence", false);
-    esp_task_wdt_init(WDT_TIMEOUT, true);
 
-    while (digitalRead(GPIO_NUM_33) == HIGH) {
-        handleHighState();
-    }
+    shouldBlink = true;
+    handleHighState();
 
-    // confirm that the sensor is low
     waitForSensorState(LOW, 35000, "sensor was LOW for last 35 seconds, ending wake up sequence", true);
-    preferences.putBool("alreadyAlarmed", false);
     handleLowState();
 
     xQueueReceive(queue, &value, 0);
     printAndPublish(true, "releasing queue value: %d", value);
     shouldBlink = false;
+    esp_deep_sleep_start();
 }
 
 BLYNK_WRITE(V0) {
     int pinValue = param.asInt();
     if (pinValue == 0) {
-        printAndPublish("received Blynk call to stop the alarm");
         digitalWrite(RELAY_PIN, LOW);
     }
 }
 
-void sensor_woke_up() {
+void esp_woke_up() {
     int value = 1;
-    if(xQueueSend(queue, &value, pdMS_TO_TICKS(60000)) == pdPASS) {
-        if (digitalRead(GPIO_NUM_33) == HIGH ) {
-            printAndPublish(false, "processTrigger called from sensor_woke_up");
+    if (xQueueSend(queue, &value, pdMS_TO_TICKS(60000)) == pdPASS) {
+        if (digitalRead(GPIO_NUM_33) == HIGH) {
+            printAndPublish(false, "processTrigger called from esp_woke_up");
             processTrigger();
         } else {
             printAndPublish(false, "waiting for sensor to be HIGH");
@@ -302,33 +365,58 @@ void sensor_woke_up() {
     }
 }
 
+void check_reset_reason() {
+    esp_reset_reason_t reset_reason = esp_reset_reason();
+
+    preferences.begin(PREF_NAMESPACE, false);
+
+    if (reset_reason != ESP_RST_TASK_WDT && reset_reason != ESP_RST_WDT && reset_reason != ESP_RST_POWERON &&
+        reset_reason != ESP_RST_SW && reset_reason != ESP_RST_PANIC && reset_reason != ESP_RST_BROWNOUT) {
+        if (preferences.getBool(ALARM_TRIGGERED_KEY, false)) {
+            preferences.putBool(ALARM_TRIGGERED_KEY, false);
+            Serial.printf("Abnormal reset detected (reason: %d) - resetting alarm state\n", reset_reason);
+        } else {
+            Serial.printf("Abnormal reset detected (reason: %d) - alarm was not triggered\n", reset_reason);
+        }
+    } else {
+        Serial.printf("Normal reset detected (reason: %d) - preserving alarm state\n", reset_reason);
+    }
+
+    preferences.end();
+}
+
 void setup() {
     Serial.begin(115200);
-    WiFi.onEvent(onWiFiEvent);
-    preferences.begin("tw", false);
 
-    // Initialize pins
+    check_reset_reason();
+    esp_task_wdt_init(WDT_TIMEOUT, true);
+
     pinMode(LED_PIN, OUTPUT);
     digitalWrite(LED_PIN, LOW);
-
     pinMode(GPIO_NUM_33, INPUT_PULLDOWN);
-
     pinMode(RELAY_PIN, OUTPUT);
     digitalWrite(RELAY_PIN, LOW);
-
     pinMode(RELAY_TURN_OFF_BUTTON, INPUT_PULLDOWN);
-    attachInterrupt(RELAY_TURN_OFF_BUTTON, triggerSoundOff, RISING);
 
-    // Initialize queue
+    if (!was_alarm_triggered()) {
+        xTaskCreate(
+                buttonMonitorTask,
+                "ButtonMonitor",
+                2048,
+                nullptr,
+                50,
+                nullptr
+        );
+    }
+
     queue = xQueueCreate(1, sizeof(int));
 
-    // Configure deep sleep wakeup
     esp_sleep_enable_ext0_wakeup(GPIO_NUM_33, 1);
-    sensor_woke_up();
+    esp_woke_up();
 
     printAndPublish(false, "going to sleep now");
-    esp_task_wdt_deinit();
     esp_deep_sleep_start();
 }
 
-void loop() {}
+void loop() {
+}
