@@ -132,9 +132,13 @@ func TapWaterStatusHandler(ctx *gin.Context) {
 		return
 	}
 
+	location, _ := time.LoadLocation(LOCATION)
+	currentTime := time.Now().In(location)
+	currentDate := currentTime.Format("2-1-2006") // Using current date instead of request body
+
 	requestLogger = requestLogger.WithFields(logrus.Fields{
 		"status": statusUpdate.Status,
-		"date":   statusUpdate.Date,
+		"date":   currentDate,
 	})
 	requestLogger.Info("received status update")
 
@@ -147,14 +151,11 @@ func TapWaterStatusHandler(ctx *gin.Context) {
 		return
 	}
 
-	location, _ := time.LoadLocation(LOCATION)
-	currentTime := time.Now().In(location)
-
 	switch statusUpdate.Status {
 	case "start":
 		requestLogger.Info("processing water start status")
 		startRecord := tapWaterStartTime{
-			Date:      statusUpdate.Date,
+			Date:      currentDate,
 			StartTime: currentTime.Format("15:04"),
 		}
 
@@ -172,7 +173,7 @@ func TapWaterStatusHandler(ctx *gin.Context) {
 		requestLogger.Info("saved start time record")
 
 		initialRecord := tapWater{
-			Date:      fmt.Sprintf("%s, %s", currentTime.Format("Mon"), statusUpdate.Date),
+			Date:      fmt.Sprintf("%s, %s", currentTime.Format("Mon"), currentDate),
 			StartTime: currentTime.Format("3:04 PM"),
 		}
 
@@ -196,14 +197,14 @@ func TapWaterStatusHandler(ctx *gin.Context) {
 		var startTimeRecord tapWaterStartTime
 		_, err = supabaseClient.From("start_time").
 			Select("*", "", false).
-			Eq("date", statusUpdate.Date).
+			Eq("date", currentDate).
 			Single().
 			ExecuteTo(&startTimeRecord)
 
 		if err != nil {
 			requestLogger.Error("failed to retrieve start time", logrus.Fields{
 				"error": err,
-				"date":  statusUpdate.Date,
+				"date":  currentDate,
 			})
 			ctx.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve start time"})
 			return
@@ -219,7 +220,7 @@ func TapWaterStatusHandler(ctx *gin.Context) {
 		duration := int(currentTime.Sub(startTimeToday).Minutes())
 
 		record := tapWater{
-			Date:      fmt.Sprintf("%s, %s", currentTime.Format("Mon"), statusUpdate.Date),
+			Date:      fmt.Sprintf("%s, %s", currentTime.Format("Mon"), currentDate),
 			StartTime: startTimeToday.Format("3:04 PM"),
 			EndTime:   currentTime.Format("3:04 PM"),
 			Duration:  duration,
@@ -250,13 +251,13 @@ func TapWaterStatusHandler(ctx *gin.Context) {
 
 		_, _, err = supabaseClient.From("start_time").
 			Delete("", "").
-			Eq("date", statusUpdate.Date).
+			Eq("date", currentDate).
 			Execute()
 
 		if err != nil {
 			requestLogger.Warn("failed to delete start time record", logrus.Fields{
 				"error": err,
-				"date":  statusUpdate.Date,
+				"date":  currentDate,
 			})
 		} else {
 			requestLogger.Info("deleted start time record")
@@ -279,9 +280,13 @@ func TapWaterStartGetHandler(ctx *gin.Context) {
 
 	const tableName = "start_time"
 	var record tapWaterStartTime
-	date := ctx.Query("date")
 
-	requestLogger = requestLogger.WithField("date", date)
+	// Use current date instead of query parameter
+	location, _ := time.LoadLocation(LOCATION)
+	currentTime := time.Now().In(location)
+	currentDate := currentTime.Format("2-1-2006")
+
+	requestLogger = requestLogger.WithField("date", currentDate)
 	requestLogger.Info("retrieving start time record")
 
 	supabaseClient, err := createSupabaseClient()
@@ -295,7 +300,7 @@ func TapWaterStartGetHandler(ctx *gin.Context) {
 
 	_, err = supabaseClient.From(tableName).
 		Select("*", "", false).
-		Eq("date", date).
+		Eq("date", currentDate).
 		Single().
 		ExecuteTo(&record)
 
