@@ -1,9 +1,7 @@
 # Cloud Based Tap Water Monitoring using ESP32
-
-This project is a municipal tap water alarming and monitoring system built using ESP32. It uses a sensor to detect the state of a water and records the tap water duration. The data is then sent to supabase using REST API that triggers aws lambda.
+The water-supply-monitor is an IoT-based municipal water monitoring system that automatically detects water availability, sends real-time alerts, and tracks supply patterns using ESP32 microcontroller, cloud infrastructure, and mobile applications.
 
 ## Features
-
 - Detects the state of a tap water using a sensor connected to GPIO pin 33 (detects the voltage change when the water arrives in the pipe)
 - Records the start and end times of the tap water.
 - Sends SMS alerts using Twilio to notify start and end time of the tap water.
@@ -14,8 +12,21 @@ This project is a municipal tap water alarming and monitoring system built using
 - Android app for remote monitoring and control.
 - Works with and without internet (no remote monitoring and control without internet).
 
+## Mobile App
+### Demo Video
+[Watch the app demo video](./artifacts/app_demo.mp4)
+
+### App Screenshots
+<div style="display: flex; gap: 20px;">
+    <img src="./artifacts/app_front_page.jpg" alt="App Front Page" height="600"/>
+    <img src="./artifacts/app_history.jpg" alt="Water History" height="600"/>
+</div>
+
+### SMS Notifications
+<img src="./artifacts/sms.jpg" alt="SMS Notifications" height="600"/>
+
 ## Technical details
-- Uses freeRTOS threads for multitasking such as 
+- Uses freeRTOS threads for multitasking such as
   - Connecting to WiFi
   - Establishing connection with Blynk and time server.
   - LED blinking when the system is running
@@ -24,7 +35,6 @@ This project is a municipal tap water alarming and monitoring system built using
 - Uses ISR to turn off the speakers using push button.
 
 ## Hardware
-
 - ESP32-WROOM-32U
 - 9v SMPS power supply
 - 9v to 5v buck converter
@@ -36,15 +46,17 @@ This project is a municipal tap water alarming and monitoring system built using
 - Push button connected to GPIO pin 26 for manually turning off the relay
 - Breadboard for reusing the power pins of esp32.
 
-## Software
+## Hardware Setup Photos
+<div style="display: flex; gap: 20px; flex-wrap: wrap;">
+    <img src="./resized_with_speakers.png" height="600" width="400" alt="Setup with Speakers"/>
+    <img src="./20240513_184858.jpg" height="600" width="400" alt="Hardware Setup 1"/>
+    <img src="./20240513_201157.jpg" height="600" width="400" alt="Hardware Setup 2"/>
+</div>
 
+## Software
 - PlatformIO + VSCode
 - Flutterflow for Android app
 - Blynk IoT API that connects Android app to ESP32
 - Supabase (Postgres) for storing the data
 - API Gateway for triggering the lambda function
 - Twilio for sending SMS alerts
-
-<img src="./resized_with_speakers.png" height="600" width="400">
-<img src="./20240513_184858.jpg" height="600" width="400">
-<img src="./20240513_201157.jpg" height="600" width="400">
