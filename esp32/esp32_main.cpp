@@ -19,7 +19,7 @@ const int RELAY_PIN = 25;
 const int RELAY_TURN_OFF_BUTTON = 26;
 const int mqtt_port = 8883;
 const int WDT_TIMEOUT = 25;
-const int BUTTON_CHECK_INTERVAL = 50;
+const int BUTTON_CHECK_INTERVAL = 100;
 
 const unsigned long CONNECTIVITY_CHECK_INTERVAL = 15000;
 volatile bool g_startStatusSent = false;
@@ -726,6 +726,14 @@ void processTrigger() {
 
     g_startStatusSent = false;
     trigger = 0;
+    if (!ledDaemonCreated) {
+        xTaskCreate(blinkLed, "BL", 1000, nullptr, 1, nullptr);
+        ledDaemonCreated = true;
+    }
+    if (!connectivityDaemonCreated) {
+        xTaskCreate(connectivityDaemonTask, "CD", 10000, nullptr, 5, nullptr);
+        connectivityDaemonCreated = true;
+    }
 
     while (true) {
         // Reset watchdog in the main loop
@@ -761,15 +769,6 @@ void processTrigger() {
                 Serial.println("HIGH state detected - resetting 30 second timer");
                 inLowState = false;
             }
-        }
-
-        if (!ledDaemonCreated) {
-            xTaskCreate(blinkLed, "BL", 1000, nullptr, 50, nullptr);
-            ledDaemonCreated = true;
-        }
-        if (!connectivityDaemonCreated) {
-            xTaskCreate(connectivityDaemonTask, "CD", 10000, nullptr, 1, nullptr);
-            connectivityDaemonCreated = true;
         }
 
         char message[128];
@@ -864,7 +863,7 @@ void setup() {
                 "ButtonMonitor",
                 2048,
                 nullptr,
-                50,
+                2,
                 nullptr
         );
     }
