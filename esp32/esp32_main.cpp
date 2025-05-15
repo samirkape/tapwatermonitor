@@ -21,6 +21,9 @@ const int mqtt_port = 8883;
 const int WDT_TIMEOUT = 25;
 const int BUTTON_CHECK_INTERVAL = 100;
 
+bool connectivityDaemonCreated = false;
+bool ledDaemonCreated = false;
+
 const unsigned long CONNECTIVITY_CHECK_INTERVAL = 15000;
 volatile bool g_startStatusSent = false;
 volatile bool g_connectivityDaemonRunning = true;
@@ -41,6 +44,10 @@ Preferences preferences;
 const char *PREF_NAMESPACE = "wdt";
 const char *ALARM_TRIGGERED_KEY = "alarm_triggered";
 
+String scheduledStartTime = "";
+String scheduledStartDate = "";
+bool shouldTriggerAlarm = false;
+
 // Forward declarations of functions used before their definition
 void printAndPublish(bool isConnected = true, const char *format = "", ...);
 
@@ -50,8 +57,16 @@ String getDateTimeForFormat(const String &format) {
 
 void buttonMonitorTask(void *parameter) {
     const TickType_t xDelay = pdMS_TO_TICKS(BUTTON_CHECK_INTERVAL);
+    const TickType_t xMaxWait = pdMS_TO_TICKS(5 * 60 * 1000);       // 5 minutes in ticks
+
+    TickType_t xStartTime = xTaskGetTickCount();
+
     while (true) {
         if (digitalRead(RELAY_TURN_OFF_BUTTON) == HIGH) {
+            digitalWrite(RELAY_PIN, LOW);
+            break;
+        }
+        if ((xTaskGetTickCount() - xStartTime) >= xMaxWait) {
             digitalWrite(RELAY_PIN, LOW);
             break;
         }
@@ -59,6 +74,7 @@ void buttonMonitorTask(void *parameter) {
     }
     vTaskDelete(nullptr);
 }
+
 
 bool was_alarm_triggered() {
     if (!preferences.begin(PREF_NAMESPACE, true)) {
@@ -643,63 +659,167 @@ public:
     }
 };
 
-void processTrigger() {
-    Serial.println("processTrigger called - waiting for stable state");
-
-    const unsigned long STABILITY_CHECK_DURATION = 15000;  // 15 seconds total timeout
-    const size_t STABILITY_BUFFER_SIZE = 10;              // Store 10 readings
-    const float STABILITY_THRESHOLD = 0.9;                // 90% must be HIGH
-    const unsigned long SAMPLING_INTERVAL = 1000;         // Take reading every second
-    const size_t MINIMUM_SAMPLES_REQUIRED = 10;           // Need all 10 readings before decision
-
-    RollingSensorState<STABILITY_BUFFER_SIZE> stabilityState(STABILITY_THRESHOLD, MINIMUM_SAMPLES_REQUIRED);
-
-    unsigned long stabilityStartTime = millis();
-    unsigned long lastSampleTime = 0;
-    bool stabilityAchieved = false;
-    int totalSamples = 0;
-
-    Serial.println("Beginning stability check...");
-
-    while (millis() - stabilityStartTime < STABILITY_CHECK_DURATION) {
-        unsigned long currentTime = millis();
-
-        // Only take readings at the specified interval
-        if (currentTime - lastSampleTime >= SAMPLING_INTERVAL) {
-            bool rawReading = (digitalRead(GPIO_NUM_33) == HIGH);
-            stabilityState.addReading(rawReading);
-            lastSampleTime = currentTime;
-            totalSamples++;
-
-            // Print status after each reading
-            Serial.printf("Stability check: Reading %d/10: %s, Average: %.2f%% HIGH (need %.2f%%)\n",
-                totalSamples,
-                rawReading ? "HIGH" : "LOW",
-                stabilityState.getAverage() * 100,
-                STABILITY_THRESHOLD * 100);
-
-            // Check for stability once we have all 10 samples
-            if (totalSamples >= MINIMUM_SAMPLES_REQUIRED) {
-                if (stabilityState.getCurrentState() && stabilityState.getAverage() >= STABILITY_THRESHOLD) {
-                    stabilityAchieved = true;
-                    Serial.printf("Stable HIGH state achieved after %d seconds!\n", totalSamples);
-                    break;
-                }
-                // If we have all samples but didn't achieve stability, we can exit early
-                if (stabilityState.getAverage() < STABILITY_THRESHOLD) {
-                    Serial.println("Failed to achieve stability after all samples collected");
-                    break;
-                }
-            }
-        }
-
-        delay(50); // Small delay to prevent tight looping
+bool checkStartTimeFromAPI() {
+    if (!g_wifi_connected) {
+        Serial.println("Cannot check start time API: WiFi not connected");
+        return false;
     }
 
-    if (!stabilityAchieved) {
-        Serial.println("Could not achieve stable HIGH state - aborting trigger");
-        esp_task_wdt_delete(NULL); // Remove this task from watchdog monitoring
-        return;
+    HTTPClient http;
+    String payload;
+    bool result = false;
+
+    Serial.println("Checking start time from API...");
+    http.begin(startTimeAPI);
+    int httpResponseCode = http.GET();
+
+    if (httpResponseCode > 0) {
+        Serial.printf("HTTP Response code: %d\n", httpResponseCode);
+        payload = http.getString();
+        Serial.printf("API Response: %s\n", payload.c_str());
+
+        // Check if response is empty
+        if (payload.length() < 5) {  // A simple check for very short responses
+            Serial.println("Received empty or invalid response");
+            http.end();
+            return false;
+        }
+
+        // Parse JSON response
+        JsonDocument jsonDoc;
+        DeserializationError error = deserializeJson(jsonDoc, payload);
+
+        if (!error) {
+            // Check if the response has the expected fields
+            if (jsonDoc.containsKey("date") && jsonDoc.containsKey("start_time")) {
+                scheduledStartDate = jsonDoc["date"].as<String>();
+                scheduledStartTime = jsonDoc["start_time"].as<String>();
+
+                // Handle case where fields exist but are empty
+                if (scheduledStartDate.isEmpty() || scheduledStartTime.isEmpty()) {
+                    Serial.println("Date or time fields are empty in API response");
+                    http.end();
+                    return false;
+                }
+
+                // Get current date and time
+                String currentDate = getDateTimeForFormat("d-M-Y");
+                String currentTime = getDateTimeForFormat("H:i");
+
+                Serial.printf("Current: %s %s, Scheduled: %s %s\n",
+                              currentDate.c_str(), currentTime.c_str(),
+                              scheduledStartDate.c_str(), scheduledStartTime.c_str());
+
+                // Check if date matches and time is now or has passed
+                if (currentDate == scheduledStartDate) {
+                    // Compare time - simple string comparison for HH:MM format
+                    if (currentTime >= scheduledStartTime) {
+                        result = true;
+                        Serial.println("Start time has been reached!");
+                    } else {
+                        Serial.println("Waiting for scheduled start time");
+                    }
+                } else {
+                    Serial.println("Date doesn't match scheduled date");
+                }
+            } else {
+                Serial.println("API response missing required fields");
+            }
+        } else {
+            Serial.printf("Failed to parse JSON: %s\n", error.c_str());
+        }
+    } else {
+        Serial.printf("Error connecting to API: %d\n", httpResponseCode);
+    }
+
+    http.end();
+    return result;
+}
+
+void processTrigger() {
+    Serial.println("processTrigger called - checking conditions");
+
+    // First check API for start time if connectivity is available
+    shouldTriggerAlarm = false;
+    bool apiCheckPerformed = false;
+
+    if (g_wifi_connected) {
+        shouldTriggerAlarm = checkStartTimeFromAPI();
+        apiCheckPerformed = true;
+        printAndPublish(true, "API check result: %s", shouldTriggerAlarm ? "trigger alarm" : "don't trigger alarm");
+    } else {
+        printAndPublish(false, "No connectivity, proceeding without API time check");
+    }
+
+    // If we couldn't check the API or got an empty response, default to sensor-based behavior
+    if (!apiCheckPerformed || (apiCheckPerformed && !shouldTriggerAlarm)) {
+        Serial.println("Proceeding with sensor-based trigger logic");
+
+        // Begin with stability check
+        const unsigned long STABILITY_CHECK_DURATION = 15000;  // 15 seconds total timeout
+        const size_t STABILITY_BUFFER_SIZE = 10;              // Store 10 readings
+        const float STABILITY_THRESHOLD = 0.9;                // 90% must be HIGH
+        const unsigned long SAMPLING_INTERVAL = 1000;         // Take reading every second
+        const size_t MINIMUM_SAMPLES_REQUIRED = 10;           // Need all 10 readings before decision
+
+        RollingSensorState<STABILITY_BUFFER_SIZE> stabilityState(STABILITY_THRESHOLD, MINIMUM_SAMPLES_REQUIRED);
+
+        unsigned long stabilityStartTime = millis();
+        unsigned long lastSampleTime = 0;
+        bool stabilityAchieved = false;
+        int totalSamples = 0;
+
+        Serial.println("Beginning stability check...");
+
+        while (millis() - stabilityStartTime < STABILITY_CHECK_DURATION) {
+            unsigned long currentTime = millis();
+
+            // Only take readings at the specified interval
+            if (currentTime - lastSampleTime >= SAMPLING_INTERVAL) {
+                bool rawReading = (digitalRead(GPIO_NUM_33) == HIGH);
+                stabilityState.addReading(rawReading);
+                lastSampleTime = currentTime;
+                totalSamples++;
+
+                // Print status after each reading
+                Serial.printf("Stability check: Reading %d/10: %s, Average: %.2f%% HIGH (need %.2f%%)\n",
+                    totalSamples,
+                    rawReading ? "HIGH" : "LOW",
+                    stabilityState.getAverage() * 100,
+                    STABILITY_THRESHOLD * 100);
+
+                // Check for stability once we have all 10 samples
+                if (totalSamples >= MINIMUM_SAMPLES_REQUIRED) {
+                    if (stabilityState.getCurrentState() && stabilityState.getAverage() >= STABILITY_THRESHOLD) {
+                        stabilityAchieved = true;
+                        Serial.printf("Stable HIGH state achieved after %d seconds!\n", totalSamples);
+                        // If we didn't have an API trigger, use sensor state
+                        if (!apiCheckPerformed) {
+                            shouldTriggerAlarm = true;
+                        }
+                        break;
+                    }
+                    // If we have all samples but didn't achieve stability, we can exit early
+                    if (stabilityState.getAverage() < STABILITY_THRESHOLD) {
+                        Serial.println("Failed to achieve stability after all samples collected");
+                        break;
+                    }
+                }
+            }
+
+            delay(50); // Small delay to prevent tight looping
+        }
+
+        if (!stabilityAchieved) {
+            Serial.println("Could not achieve stable HIGH state - aborting trigger");
+            esp_task_wdt_delete(NULL); // Remove this task from watchdog monitoring
+            return;
+        }
+
+        // If we got here through sensor stability but not API, enable trigger
+        if (!apiCheckPerformed) {
+            shouldTriggerAlarm = true;
+        }
     }
 
     Serial.println("Proceeding with main trigger logic");
@@ -708,9 +828,6 @@ void processTrigger() {
     int loop = 0;
     const size_t BUFFER_SIZE = 20;           // Increased buffer size
     const float STATE_THRESHOLD = 0.7;
-
-    static bool connectivityDaemonCreated = false;
-    static bool ledDaemonCreated = false;
 
     // Variables for tracking LOW state duration
     static unsigned long lowStateStartTime = 0;
@@ -726,27 +843,19 @@ void processTrigger() {
 
     g_startStatusSent = false;
     trigger = 0;
-    if (!ledDaemonCreated) {
-        xTaskCreate(blinkLed, "BL", 1000, nullptr, 1, nullptr);
-        ledDaemonCreated = true;
-    }
-    if (!connectivityDaemonCreated) {
-        xTaskCreate(connectivityDaemonTask, "CD", 10000, nullptr, 5, nullptr);
-        connectivityDaemonCreated = true;
-    }
 
     while (true) {
         // Reset watchdog in the main loop
         esp_task_wdt_reset();
 
-        if (!was_alarm_triggered()) {
-            digitalWrite(RELAY_PIN, HIGH);
-            mark_alarm_triggered();
-        }
-
         if (g_wifi_connected && !g_startStatusSent) {
             sendStatusToAPI("start");
             g_startStatusSent = true;
+        }
+
+        if (!was_alarm_triggered() && shouldTriggerAlarm) {
+            digitalWrite(RELAY_PIN, HIGH);
+            mark_alarm_triggered();
         }
 
         bool rawSensorState = sensor.read();
@@ -808,6 +917,14 @@ void esp_woke_up() {
     if (xQueueSend(queue, &value, pdMS_TO_TICKS(60000)) == pdPASS) {
         if (digitalRead(GPIO_NUM_33) == HIGH) {
             printAndPublish(false, "processTrigger called from esp_woke_up");
+            if (!ledDaemonCreated) {
+                xTaskCreate(blinkLed, "BL", 1000, nullptr, 1, nullptr);
+                ledDaemonCreated = true;
+            }
+            if (!connectivityDaemonCreated) {
+                xTaskCreate(connectivityDaemonTask, "CD", 10000, nullptr, 5, nullptr);
+                connectivityDaemonCreated = true;
+            }
             processTrigger();
         } else {
             printAndPublish(false, "waiting for sensor to be HIGH");
